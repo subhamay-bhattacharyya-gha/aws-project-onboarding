@@ -481,20 +481,22 @@ jobs:
                 echo "ERROR: environment '$ENV_NAME' is protected but no reviewer teams resolved — prevent_self_review requires at least one reviewer"
                 exit 1
               fi
+              # Phase 1: attach reviewers without prevent_self_review. GitHub's
+              # environment API validates prevent_self_review against the
+              # persisted reviewer list, so we must PUT reviewers first, then
+              # PUT again with prevent_self_review in Phase 2.
               PAYLOAD=$(jq -n \
                 --argjson wait "$WAIT_TIMER" \
                 --argjson reviewers "$REVIEWER_IDS" \
                 '{
-                  wait_timer:          $wait,
-                  reviewers:           $reviewers,
-                  prevent_self_review: true,
+                  wait_timer: $wait,
+                  reviewers:  $reviewers,
                   deployment_branch_policy: {
                     protected_branches:     false,
                     custom_branch_policies: true
                   }
                 }')
               echo "  Tier: protected — approval gate enabled (wait=${WAIT_TIMER}, reviewers=${REVIEWER_COUNT}, prevent_self_review=true)"
-              echo "  Protection payload: $PAYLOAD"
             else
               PAYLOAD='{}'
               echo "  Tier: non-protected — no approval gate"
@@ -516,6 +518,46 @@ jobs:
               exit 1
             fi
             echo "  Environment '$ENV_NAME' upserted (HTTP $HTTP_STATUS)"
+
+            # Phase 2 for protected envs: verify reviewers persisted, then PUT
+            # again with prevent_self_review. If the effective reviewer count
+            # is 0 after Phase 1, the team likely lacks repo access.
+            if [ "$IS_PROTECTED" = "true" ]; then
+              PERSISTED=$(echo "$BODY" | jq '[.protection_rules[]? | select(.type=="required_reviewers") | .reviewers[]?] | length')
+              echo "  Reviewers persisted after Phase 1: $PERSISTED"
+              if [ "$PERSISTED" = "0" ]; then
+                echo "ERROR: reviewers did not persist on environment '$ENV_NAME'. The team '$(echo "$REVIEWER_TEAMS" | jq -r '.[0]')' probably has no access to this repository."
+                exit 1
+              fi
+              PSR_PAYLOAD=$(jq -n \
+                --argjson wait "$WAIT_TIMER" \
+                --argjson reviewers "$REVIEWER_IDS" \
+                '{
+                  wait_timer:          $wait,
+                  reviewers:           $reviewers,
+                  prevent_self_review: true,
+                  deployment_branch_policy: {
+                    protected_branches:     false,
+                    custom_branch_policies: true
+                  }
+                }')
+              PSR_RESP=$(curl -s -w "\n%{http_code}" \
+                --request PUT \
+                --header "Authorization: Bearer $GITHUB_PAT" \
+                --header "Accept: application/vnd.github+json" \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                --header "Content-Type: application/json" \
+                --data "$PSR_PAYLOAD" \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/environments/$ENV_NAME")
+              PSR_STATUS=$(echo "$PSR_RESP" | tail -1)
+              PSR_BODY=$(echo "$PSR_RESP" | head -n -1)
+              if [ "$PSR_STATUS" != "200" ] && [ "$PSR_STATUS" != "201" ]; then
+                echo "ERROR: Failed to set prevent_self_review on '$ENV_NAME' (HTTP $PSR_STATUS)"
+                echo "$PSR_BODY" | jq .
+                exit 1
+              fi
+              echo "  prevent_self_review enabled on '$ENV_NAME' (HTTP $PSR_STATUS)"
+            fi
 
             # For protected environments, restrict deployments to the 'main' branch.
             if [ "$IS_PROTECTED" = "true" ]; then

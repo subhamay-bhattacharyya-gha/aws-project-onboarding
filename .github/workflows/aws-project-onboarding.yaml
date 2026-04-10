@@ -564,8 +564,7 @@ jobs:
                     required_approving_review_count: $approvals,
                     dismiss_stale_reviews_on_push:   $dismiss,
                     require_code_owner_review:       false,
-                    require_last_push_approval:      false,
-                    allowed_merge_methods:           ["squash","merge","rebase"]
+                    require_last_push_approval:      false
                   }
                 }
                 else empty end),
@@ -593,6 +592,9 @@ jobs:
               },
               rules: $rules
             }')
+
+          echo "Ruleset payload:"
+          echo "$PAYLOAD" | jq .
 
           LIST_RESP=$(curl -s -w "\n%{http_code}" \
             --header "Authorization: Bearer $GITHUB_PAT" \

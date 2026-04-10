@@ -544,8 +544,6 @@ jobs:
           BLOCK_FORCE: ${{ steps.parse.outputs.block_force_pushes }}
           PREVENT_DELETION: ${{ steps.parse.outputs.prevent_deletion }}
         run: |
-          RULESET_NAME="standard-branch-protection"
-
           RULES=$(jq -n \
             --argjson require_pr  "$REQUIRE_PR" \
             --argjson approvals   "$REQUIRED_APPROVALS" \
@@ -581,7 +579,7 @@ jobs:
             ]
             ')
 
-          PAYLOAD=$(jq -n \
+          PROTECTION_PAYLOAD=$(jq -n \
             --arg target "$TARGET_BRANCH" \
             --argjson rules "$RULES" \
             '{
@@ -594,53 +592,79 @@ jobs:
               rules: $rules
             }')
 
-          echo "Ruleset payload:"
-          echo "$PAYLOAD" | jq .
+          NAME_POLICY_PAYLOAD=$(jq -n '
+            {
+              name:        "branch-name-policy",
+              target:      "branch",
+              enforcement: "active",
+              conditions: {
+                ref_name: { include: ["~ALL"], exclude: ["refs/heads/main"] }
+              },
+              rules: [
+                {
+                  type: "branch_name_pattern",
+                  parameters: {
+                    operator: "regex",
+                    pattern:  "^(main|feature/.+|bug/.+)$",
+                    negate:   false,
+                    name:     "Allowed branch names"
+                  }
+                }
+              ]
+            }')
 
-          LIST_RESP=$(curl -s -w "\n%{http_code}" \
-            --header "Authorization: Bearer $GITHUB_PAT" \
-            --header "Accept: application/vnd.github+json" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/rulesets")
-          LS=$(echo "$LIST_RESP" | tail -1)
-          LB=$(echo "$LIST_RESP" | head -n -1)
-          if [ "$LS" != "200" ]; then
-            echo "ERROR: Failed to list rulesets (HTTP $LS)"
-            echo "$LB" | jq .
-            exit 1
-          fi
-          EXISTING_ID=$(echo "$LB" | jq -r --arg name "$RULESET_NAME" '.[] | select(.name == $name) | .id' | head -1)
+          upsert_ruleset() {
+            local NAME="$1" PAYLOAD="$2"
+            local LIST_RESP LS LB EXISTING_ID RESPONSE ACTION HTTP_STATUS BODY
 
-          if [ -n "$EXISTING_ID" ]; then
-            RESPONSE=$(curl -s -w "\n%{http_code}" \
-              --request PUT \
+            LIST_RESP=$(curl -s -w "\n%{http_code}" \
               --header "Authorization: Bearer $GITHUB_PAT" \
               --header "Accept: application/vnd.github+json" \
               --header "X-GitHub-Api-Version: 2022-11-28" \
-              --header "Content-Type: application/json" \
-              --data "$PAYLOAD" \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/rulesets/$EXISTING_ID")
-            ACTION="updated"
-          else
-            RESPONSE=$(curl -s -w "\n%{http_code}" \
-              --request POST \
-              --header "Authorization: Bearer $GITHUB_PAT" \
-              --header "Accept: application/vnd.github+json" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              --header "Content-Type: application/json" \
-              --data "$PAYLOAD" \
               "https://api.github.com/repos/$GITHUB_REPOSITORY/rulesets")
-            ACTION="created"
-          fi
+            LS=$(echo "$LIST_RESP" | tail -1)
+            LB=$(echo "$LIST_RESP" | head -n -1)
+            if [ "$LS" != "200" ]; then
+              echo "ERROR: Failed to list rulesets (HTTP $LS)"
+              echo "$LB" | jq .
+              exit 1
+            fi
+            EXISTING_ID=$(echo "$LB" | jq -r --arg name "$NAME" '.[] | select(.name == $name) | .id' | head -1)
 
-          HTTP_STATUS=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | head -n -1)
-          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ]; then
-            echo "ERROR: Failed to $ACTION ruleset (HTTP $HTTP_STATUS)"
-            echo "$BODY" | jq .
-            exit 1
-          fi
-          echo "Ruleset '$RULESET_NAME' $ACTION (HTTP $HTTP_STATUS)"
+            if [ -n "$EXISTING_ID" ]; then
+              RESPONSE=$(curl -s -w "\n%{http_code}" \
+                --request PUT \
+                --header "Authorization: Bearer $GITHUB_PAT" \
+                --header "Accept: application/vnd.github+json" \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                --header "Content-Type: application/json" \
+                --data "$PAYLOAD" \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/rulesets/$EXISTING_ID")
+              ACTION="updated"
+            else
+              RESPONSE=$(curl -s -w "\n%{http_code}" \
+                --request POST \
+                --header "Authorization: Bearer $GITHUB_PAT" \
+                --header "Accept: application/vnd.github+json" \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                --header "Content-Type: application/json" \
+                --data "$PAYLOAD" \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/rulesets")
+              ACTION="created"
+            fi
+
+            HTTP_STATUS=$(echo "$RESPONSE" | tail -1)
+            BODY=$(echo "$RESPONSE" | head -n -1)
+            if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ]; then
+              echo "ERROR: Failed to $ACTION ruleset '$NAME' (HTTP $HTTP_STATUS)"
+              echo "$BODY" | jq .
+              exit 1
+            fi
+            echo "Ruleset '$NAME' $ACTION (HTTP $HTTP_STATUS)"
+          }
+
+          upsert_ruleset "standard-branch-protection" "$PROTECTION_PAYLOAD"
+          upsert_ruleset "branch-name-policy"         "$NAME_POLICY_PAYLOAD"
 
       # ── Step 8: Write job summary ──
       - name: Write job summary

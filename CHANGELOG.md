@@ -1,3 +1,35 @@
+# 1.0.0 (2026-04-10)
+
+
+### Bug Fixes
+
+* add missing newline at end of CODEOWNERS file ([d1f2b9e](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/d1f2b9e364dcfcbee39138c19be9f2b42e8d6f82))
+* ensure proper formatting in README.md ([fd03d33](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/fd03d33c78df5cced8bbfd9366235be7f308051b))
+
+
+### Features
+
+* add approval environments configuration to GitHub settings in env.json ([3899eb4](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/3899eb4f35aa3dba5ec9e0f9301b1464f2f9c78a))
+* add debugging output for ruleset payload in GitHub workflow ([5e07351](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/5e07351e7c44034fd0f934841bdbad0eb69eb301))
+* add required_review_thread_resolution parameter to pull request settings ([5e51dcd](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/5e51dcd6175fead9680b1ac225955edef10ab25e))
+* document env.json structure and usage for onboarding workflow ([9f51190](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/9f511904aba11e8879f5b354785c06970d10c2ce))
+* enhance approval gate logic with reviewer count validation and detailed logging ([b22eebe](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/b22eebe62256428e25d58b2d9a7b75b52060b836))
+* enhance reviewer team access management for protected environments in GitHub workflow ([97f1d7e](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/97f1d7efd80d0e358e372e1e948929f9a90529ad))
+* implement phased reviewer attachment for protected environments in GitHub workflow ([5a648f8](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/5a648f8df0a68287801a773734a92e0b14dc4a91))
+* implement v1.0.0 aws-project-onboarding reusable workflow ([5c99d67](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/5c99d6752766d65a0d6bb4ac2b29b44586947524))
+* update approval environments to include a default test environment and add AWS OIDC role to environment variables ([d241a7c](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/d241a7c58e5709fb094e946bb0c7fd0091f86852))
+* update AWS project onboarding workflow with branch name policy and protection ruleset ([0850f64](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/0850f64cad68734eb5db184585e647e0522ca6b3))
+
+
+### BREAKING CHANGES
+
+* first stable release of the aws-project-onboarding
+platform workflow. Establishes the v1 workflow_call interface
+(`config` input; `TFE_TOKEN`, `TF_VCS_OAUTH_TOKEN_ID`, `GITHUB_PAT`
+secrets) that downstream caller repos must target via `@v1`.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+
 ## [1.1.2](https://github.com/subhamay-bhattacharyya-gha/github-action-template/compare/v1.1.1...v1.1.2) (2025-05-21)
 
 

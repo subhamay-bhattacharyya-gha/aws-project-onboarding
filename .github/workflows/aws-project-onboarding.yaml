@@ -93,7 +93,7 @@ jobs:
           PROD_ENV=$(echo "$CLEAN" | jq -r '.github.production_environment // "prod"')
           REVIEWER_TEAMS=$(echo "$CLEAN" | jq -c '.github.reviewer_teams // []')
           WAIT_TIMER=$(echo "$CLEAN" | jq -r '.github.wait_timer // 0')
-          APPROVAL_ENVS=$(echo "$CLEAN" | jq -c --arg p "$PROD_ENV" '.github.approval_environments // [$p]')
+          APPROVAL_ENVS=$(echo "$CLEAN" | jq -c --arg p "$PROD_ENV" '.github.approval_environments // ["test", $p]')
 
           # ── ruleset block ──
           RULESET_ENABLED=$(echo "$CLEAN" | jq -r '.ruleset.ruleset_enabled // true')
@@ -610,8 +610,15 @@ jobs:
               fi
             fi
 
+            if [ -n "$AWS_ACCOUNT_ID" ]; then
+              AWS_OIDC_ROLE="arn:aws:iam::${AWS_ACCOUNT_ID}:role/github-oidc-role"
+            else
+              AWS_OIDC_ROLE=""
+            fi
+
             set_env_var "$ENV_NAME" "AWS_ACCOUNT_ID"              "$AWS_ACCOUNT_ID"
             set_env_var "$ENV_NAME" "AWS_REGION"                  "$AWS_REGION"
+            set_env_var "$ENV_NAME" "AWS_OIDC_ROLE"               "$AWS_OIDC_ROLE"
             set_env_var "$ENV_NAME" "SNOWFLAKE_ACCOUNT_NAME"      "$SF_ACCOUNT"
             set_env_var "$ENV_NAME" "SNOWFLAKE_ORGANIZATION_NAME" "$SF_ORG"
           done < <(echo "$ENVIRONMENTS" | jq -c '.[]')

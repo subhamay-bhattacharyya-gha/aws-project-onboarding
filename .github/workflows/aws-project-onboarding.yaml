@@ -77,10 +77,23 @@ jobs:
             exit 1
           fi
 
+          # Synthesise a 'ci' environment as a clone of 'devl' (hardcoded, not
+          # configurable via project-config.json). Skipped if 'devl' is absent
+          # or 'ci' is already defined by the caller.
+          ENVS=$(echo "$ENVS" | jq -c '
+            . as $envs
+            | ($envs | map(select(.name == "devl")) | first) as $devl
+            | if ($devl != null) and ((. | any(.name == "ci")) | not)
+              then [$devl | .name = "ci"] + .
+              else .
+              end
+          ')
+
           # ── github block ──
           PROD_ENV=$(echo "$CLEAN" | jq -r '.github.production_environment // "prod"')
           REVIEWER_TEAMS=$(echo "$CLEAN" | jq -c '.github.reviewer_teams // []')
           WAIT_TIMER=$(echo "$CLEAN" | jq -r '.github.wait_timer // 0')
+          APPROVAL_ENVS=$(echo "$CLEAN" | jq -c --arg p "$PROD_ENV" '.github.approval_environments // [$p]')
 
           # ── ruleset block ──
           RULESET_ENABLED=$(echo "$CLEAN" | jq -r '.ruleset.ruleset_enabled // true')
@@ -106,6 +119,7 @@ jobs:
             echo "production_environment=$PROD_ENV"
             echo "reviewer_teams=$REVIEWER_TEAMS"
             echo "wait_timer=$WAIT_TIMER"
+            echo "approval_environments=$APPROVAL_ENVS"
             echo "ruleset_enabled=$RULESET_ENABLED"
             echo "target_branch=$TARGET_BRANCH"
             echo "require_pr=$REQUIRE_PR"
@@ -374,6 +388,7 @@ jobs:
           PROD_ENV: ${{ steps.parse.outputs.production_environment }}
           REVIEWER_TEAMS: ${{ steps.parse.outputs.reviewer_teams }}
           WAIT_TIMER: ${{ steps.parse.outputs.wait_timer }}
+          APPROVAL_ENVS: ${{ steps.parse.outputs.approval_environments }}
         run: |
           OWNER="$GITHUB_REPOSITORY_OWNER"
 
@@ -458,23 +473,25 @@ jobs:
 
             echo "--- Configuring environment: $ENV_NAME"
 
-            # Approval gate: exact string equality against production_environment.
-            if [ "$ENV_NAME" = "$PROD_ENV" ]; then
+            # Approval gate: exact per-element match against approval_environments list.
+            IS_PROTECTED=$(echo "$APPROVAL_ENVS" | jq -r --arg n "$ENV_NAME" 'any(. == $n)')
+            if [ "$IS_PROTECTED" = "true" ]; then
               PAYLOAD=$(jq -n \
                 --argjson wait "$WAIT_TIMER" \
                 --argjson reviewers "$REVIEWER_IDS" \
                 '{
-                  wait_timer: $wait,
-                  reviewers:  $reviewers,
+                  wait_timer:          $wait,
+                  prevent_self_review: true,
+                  reviewers:           $reviewers,
                   deployment_branch_policy: {
                     protected_branches:     false,
                     custom_branch_policies: true
                   }
                 }')
-              echo "  Tier: production — approval gate enabled (wait=${WAIT_TIMER})"
+              echo "  Tier: protected — approval gate enabled (wait=${WAIT_TIMER}, prevent_self_review=true)"
             else
               PAYLOAD='{}'
-              echo "  Tier: non-production — no approval gate"
+              echo "  Tier: non-protected — no approval gate"
             fi
 
             RESPONSE=$(curl -s -w "\n%{http_code}" \
@@ -494,8 +511,8 @@ jobs:
             fi
             echo "  Environment '$ENV_NAME' upserted (HTTP $HTTP_STATUS)"
 
-            # For the production environment only, restrict deployments to the 'main' branch.
-            if [ "$ENV_NAME" = "$PROD_ENV" ]; then
+            # For protected environments, restrict deployments to the 'main' branch.
+            if [ "$IS_PROTECTED" = "true" ]; then
               POL_RESP=$(curl -s -w "\n%{http_code}" \
                 --header "Authorization: Bearer $GITHUB_PAT" \
                 --header "Accept: application/vnd.github+json" \
@@ -672,7 +689,7 @@ jobs:
         if: always()
         env:
           ENVIRONMENTS: ${{ steps.parse.outputs.environments }}
-          PROD_ENV: ${{ steps.parse.outputs.production_environment }}
+          APPROVAL_ENVS: ${{ steps.parse.outputs.approval_environments }}
           WS_VARS: ${{ steps.parse.outputs.workspace_variables }}
           RULESET_ENABLED: ${{ steps.parse.outputs.ruleset_enabled }}
           WS_NAME: ${{ steps.parse.outputs.workspace_name }}
@@ -700,7 +717,8 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           while read -r ENV_NAME; do
-            if [ "$ENV_NAME" = "$PROD_ENV" ]; then
+            IS_PROTECTED=$(echo "$APPROVAL_ENVS" | jq -r --arg n "$ENV_NAME" 'any(. == $n)')
+            if [ "$IS_PROTECTED" = "true" ]; then
               echo "| GitHub Environment: $ENV_NAME | — | Provisioned + approval gate |" >> "$GITHUB_STEP_SUMMARY"
             else
               echo "| GitHub Environment: $ENV_NAME | — | Provisioned |" >> "$GITHUB_STEP_SUMMARY"

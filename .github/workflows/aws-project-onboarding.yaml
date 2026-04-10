@@ -392,8 +392,12 @@ jobs:
         run: |
           OWNER="$GITHUB_REPOSITORY_OWNER"
 
-          # Resolve reviewer team slugs → [{type:"Team",id:N}] for the production env
+          # Resolve reviewer team slugs → [{type:"Team",id:N}] for protected envs,
+          # and ensure each team has push access to this repo (GitHub silently
+          # drops reviewer teams that lack repo access, which makes
+          # prevent_self_review fail with "at least one reviewer" later).
           REVIEWER_IDS="[]"
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
           TEAM_COUNT=$(echo "$REVIEWER_TEAMS" | jq 'length')
           if [ "$TEAM_COUNT" -gt 0 ]; then
             while read -r SLUG; do
@@ -412,6 +416,24 @@ jobs:
               TEAM_ID=$(echo "$TB" | jq -r '.id')
               REVIEWER_IDS=$(echo "$REVIEWER_IDS" | jq -c --argjson id "$TEAM_ID" '. + [{type:"Team",id:$id}]')
               echo "  Resolved reviewer team '$SLUG' → $TEAM_ID"
+
+              # Grant the team push access to this repo (idempotent upsert).
+              GRANT_RESP=$(curl -s -w "\n%{http_code}" \
+                --request PUT \
+                --header "Authorization: Bearer $GITHUB_PAT" \
+                --header "Accept: application/vnd.github+json" \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                --header "Content-Type: application/json" \
+                --data '{"permission":"push"}' \
+                "https://api.github.com/orgs/$OWNER/teams/$SLUG/repos/$OWNER/$REPO_NAME")
+              GS=$(echo "$GRANT_RESP" | tail -1)
+              GB=$(echo "$GRANT_RESP" | head -n -1)
+              if [ "$GS" != "204" ]; then
+                echo "ERROR: Failed to grant team '$SLUG' push access to $GITHUB_REPOSITORY (HTTP $GS)"
+                echo "$GB" | jq . || echo "$GB"
+                exit 1
+              fi
+              echo "  Granted team '$SLUG' push access to $GITHUB_REPOSITORY"
             done < <(echo "$REVIEWER_TEAMS" | jq -r '.[]')
           fi
 

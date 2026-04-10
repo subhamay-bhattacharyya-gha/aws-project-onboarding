@@ -476,19 +476,25 @@ jobs:
             # Approval gate: exact per-element match against approval_environments list.
             IS_PROTECTED=$(echo "$APPROVAL_ENVS" | jq -r --arg n "$ENV_NAME" 'any(. == $n)')
             if [ "$IS_PROTECTED" = "true" ]; then
+              REVIEWER_COUNT=$(echo "$REVIEWER_IDS" | jq 'length')
+              if [ "$REVIEWER_COUNT" -eq 0 ]; then
+                echo "ERROR: environment '$ENV_NAME' is protected but no reviewer teams resolved — prevent_self_review requires at least one reviewer"
+                exit 1
+              fi
               PAYLOAD=$(jq -n \
                 --argjson wait "$WAIT_TIMER" \
                 --argjson reviewers "$REVIEWER_IDS" \
                 '{
                   wait_timer:          $wait,
-                  prevent_self_review: true,
                   reviewers:           $reviewers,
+                  prevent_self_review: true,
                   deployment_branch_policy: {
                     protected_branches:     false,
                     custom_branch_policies: true
                   }
                 }')
-              echo "  Tier: protected — approval gate enabled (wait=${WAIT_TIMER}, prevent_self_review=true)"
+              echo "  Tier: protected — approval gate enabled (wait=${WAIT_TIMER}, reviewers=${REVIEWER_COUNT}, prevent_self_review=true)"
+              echo "  Protection payload: $PAYLOAD"
             else
               PAYLOAD='{}'
               echo "  Tier: non-protected — no approval gate"

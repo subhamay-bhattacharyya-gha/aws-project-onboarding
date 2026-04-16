@@ -67,6 +67,7 @@ jobs:
           BRANCH=$(echo "$CLEAN" | jq -r '.hcp.branch // "main"')
           AUTO_APPLY=$(echo "$CLEAN" | jq -r '.hcp.auto_apply // false')
           TFE_ADDRESS=$(echo "$CLEAN" | jq -r '.hcp.tfe_address // "https://app.terraform.io"')
+          LINK_VCS=$(echo "$CLEAN" | jq -r '.hcp.link_vcs // false')
           WS_VARS=$(echo "$CLEAN" | jq -c '.hcp.workspace_variables // []')
 
           # ── environments block ──
@@ -114,6 +115,7 @@ jobs:
             echo "branch=$BRANCH"
             echo "auto_apply=$AUTO_APPLY"
             echo "tfe_address=$TFE_ADDRESS"
+            echo "link_vcs=$LINK_VCS"
             echo "workspace_variables=$WS_VARS"
             echo "environments=$ENVS"
             echo "production_environment=$PROD_ENV"
@@ -231,6 +233,7 @@ jobs:
       # ── Step 4: Link VCS repository to the workspace ──
       - name: Link VCS repository
         id: link-vcs
+        if: steps.parse.outputs.link_vcs == 'true'
         env:
           TFE_TOKEN: ${{ secrets.TFE_TOKEN }}
           OAUTH_TOKEN_ID: ${{ secrets.TF_VCS_OAUTH_TOKEN_ID }}
@@ -789,8 +792,17 @@ jobs:
             echo "| Resource | Value | Status |"
             echo "|---|---|---|"
             echo "| HCP workspace | $WS_NAME | $WS_STATUS |"
-            echo "| VCS link | $GITHUB_REPOSITORY | Linked |"
-            echo "| Workspace variables | $VAR_COUNT variables | Seeded |"
+            LINK_VCS="${{ steps.parse.outputs.link_vcs }}"
+            if [ "$LINK_VCS" = "true" ]; then
+              echo "| VCS link | $GITHUB_REPOSITORY | Linked |"
+            else
+              echo "| VCS link | — | Skipped |"
+            fi
+            if [ "$VAR_COUNT" -gt 0 ]; then
+              echo "| Workspace variables | $VAR_COUNT variables | Seeded |"
+            else
+              echo "| Workspace variables | — | Skipped |"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
           while read -r ENV_NAME; do

@@ -7,7 +7,7 @@ A centralised, reusable GitHub Actions workflow (`workflow_call`) that lets any 
 ## Features
 
 - **Single config file** — all project settings live in `env.json` at the repo root
-- **HCP Terraform integration** — creates workspaces, links VCS, and seeds variables
+- **HCP Terraform integration** — creates workspaces, optionally links VCS, and optionally seeds variables
 - **GitHub Environments** — creates environments with `AWS_ACCOUNT_ID` and `AWS_REGION` per environment; `SNOWFLAKE_ACCOUNT_NAME` and `SNOWFLAKE_ORGANIZATION_NAME` are created only for Snowflake-related repositories
 - **Production approval gate** — configurable reviewers and wait timer (exact match only)
 - **Repository rulesets** — branch protection with PR reviews, status checks, force-push blocking
@@ -24,8 +24,8 @@ The workflow runs 9 sequential steps:
 | 1    | `check`                | Check if the HCP Terraform workspace already exists |
 | 2    | `create`               | Create workspace (skipped if it exists)             |
 | 3    | `resolve`              | Merge workspace ID from create or check             |
-| 4    | `link-vcs`             | Attach VCS repository to the workspace              |
-| 5    | `set-vars`             | Seed workspace variables                            |
+| 4    | `link-vcs`             | Attach VCS repository to the workspace (skipped when `link_vcs` is `false`) |
+| 5    | `set-vars`             | Seed workspace variables (skipped when none defined) |
 | 6    | `setup-environments`   | Create GitHub Environments + set AWS / Snowflake variables |
 | 7    | `setup-ruleset`        | Create or update repository ruleset                 |
 | 8    | `summary`              | Write `$GITHUB_STEP_SUMMARY`                        |
@@ -45,9 +45,7 @@ Copy `env.json` from this platform repo and fill in your values:
     "execution_mode": "remote",
     "branch": "main",
     "auto_apply": false,
-    "workspace_variables": [
-      { "key": "TF_VAR_region", "value": "europe-west2", "sensitive": false, "category": "terraform" }
-    ]
+    "link_vcs": false
   },
   "environments": [
     { "name": "devl", "aws_account_id": "111111111111", "aws_region": "eu-west-1", "snowflake_account_name": "DOC83156", "snowflake_organization_name": "AVDNPDD" },
@@ -120,8 +118,9 @@ Push `env.json` and the caller workflow to `main`. The onboarding runs automatic
 | `working_directory` | no | `""` | Subdirectory inside the VCS repo where Terraform runs |
 | `branch` | no | `main` | VCS branch the workspace tracks |
 | `auto_apply` | no | `false` | Auto-apply successful plans |
+| `link_vcs` | no | `false` | When `true`, links the VCS repository to the workspace. When `false` or omitted, the `link-vcs` step is skipped |
 | `tfe_address` | no | `https://app.terraform.io` | Override for TFE / custom HCP endpoints |
-| `workspace_variables` | no | `[]` | Array of `{key, value, sensitive, category}` objects |
+| `workspace_variables` | no | `[]` | Array of `{key, value, sensitive, category}` objects. When omitted or empty, the `set-vars` step is skipped |
 
 ### `environments` block — GitHub Environments
 
@@ -225,6 +224,17 @@ aws-project-onboarding/
 ├── CLAUDE.md                          # AI development conventions
 └── README.md
 ```
+
+## Branch protection (this repo)
+
+The `main` branch of this platform repo has the following protection rules:
+
+| Setting | Value |
+| --- | --- |
+| Require status checks to pass | Yes |
+| Require branches to be up to date before merging | Yes |
+| Do not require status checks on creation | Yes |
+| Required status checks | `checkov-scan` (any source) |
 
 ## Versioning
 

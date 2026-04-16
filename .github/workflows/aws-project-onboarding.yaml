@@ -669,7 +669,7 @@ jobs:
                   type: "required_status_checks",
                   parameters: {
                     strict_required_status_checks_policy: false,
-                    required_status_checks: ($checks | map({context: ., integration_id: null}))
+                    required_status_checks: ($checks | map({context: ., integration_id: 0}))
                   }
                 }
                 else empty end)

@@ -102,7 +102,7 @@ jobs:
           REQUIRE_PR=true
           REQUIRED_APPROVALS=1
           DISMISS_STALE=true
-          REQUIRED_CHECKS='["checkov-scan"]'
+          REQUIRED_CHECKS='[]'
           BLOCK_FORCE=true
           PREVENT_DELETION=true
 

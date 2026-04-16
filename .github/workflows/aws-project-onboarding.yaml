@@ -90,21 +90,21 @@ jobs:
               end
           ')
 
-          # ── github block ──
-          PROD_ENV=$(echo "$CLEAN" | jq -r '.github.production_environment // "prod"')
-          REVIEWER_TEAMS=$(echo "$CLEAN" | jq -c '.github.reviewer_teams // []')
-          WAIT_TIMER=$(echo "$CLEAN" | jq -r '.github.wait_timer // 0')
-          APPROVAL_ENVS=$(echo "$CLEAN" | jq -c --arg p "$PROD_ENV" '.github.approval_environments // ["test", $p]')
+          # ── github block (hardcoded) ──
+          PROD_ENV="prod"
+          REVIEWER_TEAMS='["our-team"]'
+          WAIT_TIMER=0
+          APPROVAL_ENVS='["test","prod"]'
 
-          # ── ruleset block ──
-          RULESET_ENABLED=$(echo "$CLEAN" | jq -r '.ruleset.ruleset_enabled // true')
-          TARGET_BRANCH=$(echo "$CLEAN" | jq -r '.ruleset.target_branch // "~DEFAULT_BRANCH"')
-          REQUIRE_PR=$(echo "$CLEAN" | jq -r '.ruleset.require_pr // true')
-          REQUIRED_APPROVALS=$(echo "$CLEAN" | jq -r '.ruleset.required_approvals // 1')
-          DISMISS_STALE=$(echo "$CLEAN" | jq -r '.ruleset.dismiss_stale_reviews // true')
-          REQUIRED_CHECKS=$(echo "$CLEAN" | jq -c '.ruleset.required_status_checks // []')
-          BLOCK_FORCE=$(echo "$CLEAN" | jq -r '.ruleset.block_force_pushes // true')
-          PREVENT_DELETION=$(echo "$CLEAN" | jq -r '.ruleset.prevent_deletion // true')
+          # ── ruleset block (hardcoded) ──
+          RULESET_ENABLED=true
+          TARGET_BRANCH="~DEFAULT_BRANCH"
+          REQUIRE_PR=true
+          REQUIRED_APPROVALS=1
+          DISMISS_STALE=true
+          REQUIRED_CHECKS='["checkov-scan"]'
+          BLOCK_FORCE=true
+          PREVENT_DELETION=true
 
           {
             echo "hcp_org=$HCP_ORG"

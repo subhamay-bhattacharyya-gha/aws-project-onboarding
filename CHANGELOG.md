@@ -1,3 +1,25 @@
+# [1.1.0](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/compare/v1.0.0...v1.1.0) (2026-06-18)
+
+
+### Bug Fixes
+
+* redirect error messages to stderr for better logging ([29f20f5](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/29f20f53429bda3e743b40c375300483b7dcfb41))
+* remove integration_id from required_status_checks mapping ([07bfd3b](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/07bfd3b9337540b8c450dc41b640dc8585438be8))
+* update REQUIRED_CHECKS to an empty array in workflow configuration ([a105072](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/a105072f7286ce75bd580fbf3e7cf6ce63500303))
+* update required_status_checks to include integration_id as null ([fe4be2a](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/fe4be2a2505c3689795f82d390cfe67badd54753))
+* update required_status_checks to use integration_id as 0 instead of null ([9e76f33](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/9e76f33cb8651ad7b17d47d536e5e5c3e33f5fb7))
+
+
+### Features
+
+* add optional VCS linking to workflow and update documentation ([e9ed9cd](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/e9ed9cd2813e4ef6f7d55d1890a759f4e682b07a))
+* add ruleset configuration for branch protection in env.json ([73751ed](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/73751edac7b5b6ab4017c86fdefc35817acd0c69))
+* enhance approval gate logic for protected environments ([35b4a05](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/35b4a0555c077539a70a0999ecfb326686aef30e))
+* hardcode GitHub and ruleset configurations in workflow files ([d42c8a4](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/d42c8a4a7e90cb9ed841bdcb995573cd57782107))
+* rename workflow from 'AWS Project Onboarding' to 'Setup Repository' ([e822fb5](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/e822fb56a78b517103215d6cee465e06ecc1c8dd))
+* streamline fetching org variables by using environment variables directly ([04f4c62](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/04f4c62e6ca2b6f9d112f3e82001b65fdffe7e6d))
+* update workflow name to 'Setup Repository' and remove reviewer teams from configuration ([b841d46](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/commit/b841d461114105388eccb1e52c981e93be071c1a))
+
 # 1.0.0 (2026-04-10)
 
 

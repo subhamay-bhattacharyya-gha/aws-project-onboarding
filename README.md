@@ -2,13 +2,14 @@
 
 ![Built with Claude Code](https://img.shields.io/badge/Built_with-Claude_Code-blueviolet?logo=anthropic&logoColor=white)&nbsp;![Terraform](https://img.shields.io/badge/Terraform-7B42BC?logo=terraform&logoColor=white)&nbsp;![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-2088FF?logo=githubactions&logoColor=white)&nbsp;![Release](https://github.com/subhamay-bhattacharyya-gha/aws-project-onboarding/actions/workflows/release.yaml/badge.svg)&nbsp;![Commit Activity](https://img.shields.io/github/commit-activity/t/subhamay-bhattacharyya-gha/aws-project-onboarding)&nbsp;![Last Commit](https://img.shields.io/github/last-commit/subhamay-bhattacharyya-gha/aws-project-onboarding)&nbsp;![Release Date](https://img.shields.io/github/release-date/subhamay-bhattacharyya-gha/aws-project-onboarding)&nbsp;![Repo Size](https://img.shields.io/github/repo-size/subhamay-bhattacharyya-gha/aws-project-onboarding)&nbsp;![File Count](https://img.shields.io/github/directory-file-count/subhamay-bhattacharyya-gha/aws-project-onboarding)&nbsp;![Issues](https://img.shields.io/github/issues/subhamay-bhattacharyya-gha/aws-project-onboarding)&nbsp;![Top Language](https://img.shields.io/github/languages/top/subhamay-bhattacharyya-gha/aws-project-onboarding)&nbsp;![Custom Endpoint](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/bsubhamay/8258f1e702044c00c3d090add48c0f51/raw/aws-project-onboarding.json?)
 
-A centralised, reusable GitHub Actions workflow (`workflow_call`) that lets any application repo in the organisation onboard itself to HCP Terraform, GitHub Environments, and repository rulesets with a single `env.json` file.
+A centralised, reusable GitHub Actions workflow (`workflow_call`) that lets any application repo in the organisation onboard itself to HCP Terraform, GitHub Environments, and repository rulesets with a single `.project/environments.yaml` file.
 
 ## Features
 
-- **Single config file** — all project settings live in `env.json` at the repo root
-- **HCP Terraform integration** — creates workspaces, optionally links VCS, and optionally seeds variables
-- **GitHub Environments** — creates environments with `AWS_ACCOUNT_ID` and `AWS_REGION` per environment; `SNOWFLAKE_ACCOUNT_NAME` and `SNOWFLAKE_ORGANIZATION_NAME` are created only for Snowflake-related repositories
+- **Single config file** — all project settings live in `.project/environments.yaml` in the calling repo
+- **HCP Terraform integration** — creates workspaces, links VCS, and optionally seeds variables
+- **GitHub Environments** — creates environments with `AWS_ACCOUNT_ID`, `AWS_REGION`, and `AWS_OIDC_ROLE` per environment; `SNOWFLAKE_ACCOUNT_NAME` and `SNOWFLAKE_ORGANIZATION_NAME` are set when provided
+- **Account ID resolution** — maps environment aliases to AWS account IDs via the `AWS_ACCOUNT_ID_MAP` org variable; no account IDs are stored in the config file
 - **Production approval gate** — configurable reviewers and wait timer (exact match only)
 - **Repository rulesets** — branch protection with PR reviews, status checks, force-push blocking
 - **Fully idempotent** — every step is safe to re-run on an already-onboarded repo
@@ -16,58 +17,74 @@ A centralised, reusable GitHub Actions workflow (`workflow_call`) that lets any 
 
 ## How it works
 
-The workflow runs 9 sequential steps:
+The workflow runs 14 sequential steps:
 
-| Step | Name                   | Description                                         |
-| ---- | ---------------------- | --------------------------------------------------- |
-| 0    | `parse`                | Validate and extract all fields from `env.json`     |
-| 1    | `check`                | Check if the HCP Terraform workspace already exists |
-| 2    | `create`               | Create workspace (skipped if it exists)             |
-| 3    | `resolve`              | Merge workspace ID from create or check             |
-| 4    | `link-vcs`             | Attach VCS repository to the workspace (skipped when `link_vcs` is `false`) |
-| 5    | `set-vars`             | Seed workspace variables (skipped when none defined) |
-| 6    | `setup-environments`   | Create GitHub Environments + set AWS / Snowflake variables |
-| 7    | `setup-ruleset`        | Create or update repository ruleset                 |
-| 8    | `summary`              | Write `$GITHUB_STEP_SUMMARY`                        |
+| Step | Name                   | Description                                                                  |
+| ---- | ---------------------- | ---------------------------------------------------------------------------- |
+| 0    | Checkout               | Check out the calling repository                                             |
+| 1    | Install yq             | Install the yq YAML processor                                                |
+| 2    | `resolve-config`       | Locate `.project/environments.yaml` (or `.yml`)                              |
+| 3    | `parse`                | Validate and extract all fields from the config                              |
+| 4    | `fetch-org-vars`       | Fetch `AWS_ACCOUNT_ID_MAP` and `AWS_OIDC_ROLE_NAME` from org variables      |
+| 5    | `check`                | Check if the HCP Terraform workspace already exists                          |
+| 6    | `create`               | Create workspace (skipped if it exists)                                      |
+| 7    | `resolve`              | Merge workspace ID from create or check                                      |
+| 8    | `link-vcs`             | Attach VCS repository to the workspace                                       |
+| 9    | `set-vars`             | Seed workspace variables (skipped when none defined)                         |
+| 10   | `setup-environments`   | Create GitHub Environments + set AWS / Snowflake variables                   |
+| 11   | `setup-ruleset`        | Create or update repository ruleset                                          |
+| 12   | `sync-codeowners`      | Grant push access to every team listed in `.github/CODEOWNERS`              |
+| 13   | `summary`              | Write `$GITHUB_STEP_SUMMARY`                                                 |
 
 ## Quick start
 
-### 1. Add `env.json` to your application repo root
+### 1. Add `.project/environments.yaml` to your application repo
 
-Copy `env.json` from this platform repo and fill in your values:
+Create `.project/environments.yaml` and fill in your values:
 
-```json
-{
-  "hcp": {
-    "organization": "my-hcp-org",
-    "workspace_name": "my-app",
-    "terraform_version": "1.7.0",
-    "execution_mode": "remote",
-    "branch": "main",
-    "auto_apply": false,
-    "link_vcs": false
-  },
-  "environments": [
-    { "name": "devl", "aws_account_id": "111111111111", "aws_region": "eu-west-1", "snowflake_account_name": "DOC83156", "snowflake_organization_name": "AVDNPDD" },
-    { "name": "test", "aws_account_id": "222222222222", "aws_region": "eu-west-1", "snowflake_account_name": "DOC83158", "snowflake_organization_name": "AVDNPDE" },
-    { "name": "prod", "aws_account_id": "333333333333", "aws_region": "eu-west-1", "snowflake_account_name": "DOC83157", "snowflake_organization_name": "AVDNPDF" }
-  ],
-  "github": {
-    "production_environment": "prod",
-    "reviewer_teams": ["platform-team"],
-    "wait_timer": 5
-  },
-  "ruleset": {
-    "enabled": true,
-    "target_branch": "~DEFAULT_BRANCH",
-    "require_pr": true,
-    "required_approvals": 1,
-    "dismiss_stale_reviews": true,
-    "required_status_checks": ["ci / build", "ci / test"],
-    "block_force_pushes": true,
-    "prevent_deletion": true
-  }
-}
+```yaml
+hcp:
+  hcp_org: my-hcp-org
+  workspace_name: my-app        # optional; defaults to repo name
+  terraform_version: "1.7.0"
+  execution_mode: remote
+  working_directory: ""
+  branch: main
+  auto_apply: false
+  tfe_address: https://app.terraform.io
+  workspace_variables: []       # optional; omit or leave empty to skip set-vars
+
+aws:
+  aws_region: eu-west-1         # shared across all environments
+  environments:
+    - name: devl
+      aws_account_alias: DEVL   # must match a key in AWS_ACCOUNT_ID_MAP
+      snowflake_account_name: DOC83156
+      snowflake_organization_name: AVDNPDD
+    - name: test
+      aws_account_alias: TEST
+      snowflake_account_name: DOC83158
+      snowflake_organization_name: AVDNPDE
+    - name: prod
+      aws_account_alias: PROD
+      snowflake_account_name: DOC83157
+      snowflake_organization_name: AVDNPDF
+
+github:
+  production_environment: prod
+  approval_environments: [test, prod]
+  reviewer_teams: [platform-team]
+  wait_timer: 5
+
+ruleset:
+  ruleset_enabled: true
+  target_branch: ~DEFAULT_BRANCH
+  require_pr: true
+  required_approvals: 1
+  dismiss_stale_reviews: true
+  required_status_checks: []
+  block_force_pushes: true
+  prevent_deletion: true
 ```
 
 ### 2. Add the caller workflow
@@ -75,13 +92,13 @@ Copy `env.json` from this platform repo and fill in your values:
 Copy `templates/onboard-aws-project.yaml` to `.github/workflows/onboard-aws-project.yaml` in your app repo:
 
 ```yaml
-name: Onboard GCP Project
+name: Onboard AWS Project
 
 on:
   push:
     branches: [main]
     paths:
-      - 'env.json'
+      - '.project/environments.yaml'
       - '.github/workflows/onboard-aws-project.yaml'
   workflow_dispatch:
 
@@ -91,21 +108,30 @@ jobs:
     secrets: inherit
 ```
 
-### 3. Configure org-level secrets
+### 3. Configure org-level variables and secrets
 
-| Secret                   | Description                                                      |
-| ------------------------ | ---------------------------------------------------------------- |
-| `TFE_TOKEN`              | HCP Terraform API token                                          |
-| `TF_VCS_OAUTH_TOKEN_ID`  | OAuth token ID for VCS provider                                  |
+**Variables** (set at the org level so every calling repo inherits them):
+
+| Variable              | Description                                                                                    |
+| --------------------- | ---------------------------------------------------------------------------------------------- |
+| `AWS_ACCOUNT_ID_MAP`  | JSON map of environment alias → AWS account ID, e.g. `{"DEVL":"123456789012","PROD":"..."}` |
+| `AWS_OIDC_ROLE_NAME`  | IAM role name used for GitHub OIDC, e.g. `github-oidc-role`                                   |
+
+**Secrets** (set at the org level):
+
+| Secret                   | Description                                                        |
+| ------------------------ | ------------------------------------------------------------------ |
+| `TFE_TOKEN`              | HCP Terraform API token                                            |
+| `TF_VCS_OAUTH_TOKEN_ID`  | OAuth token ID for VCS provider                                    |
 | `GITHUB_PAT`             | Fine-grained PAT (environments: read/write, administration: write) |
 
 ### 4. Push and go
 
-Push `env.json` and the caller workflow to `main`. The onboarding runs automatically.
+Push `.project/environments.yaml` and the caller workflow to `main`. The onboarding runs automatically.
 
-## Updating `env.json`
+## Updating `.project/environments.yaml`
 
-`env.json` is the single source of truth for the onboarding. It is passed verbatim as the `config` input of the reusable workflow — every field below maps to a step output in the `parse` step and then to a downstream API call. Edit the file, commit, push, and the onboarding runs automatically because the caller workflow is triggered on pushes that touch `env.json`.
+`.project/environments.yaml` is the single source of truth for onboarding. The workflow reads it directly from the calling repo at run time — every field maps to a step output in the `parse` step and then to a downstream API call. Edit the file, commit, push, and the onboarding runs automatically because the caller workflow triggers on pushes that touch `.project/environments.yaml`.
 
 ### `hcp` block — HCP Terraform workspace
 
@@ -118,21 +144,39 @@ Push `env.json` and the caller workflow to `main`. The onboarding runs automatic
 | `working_directory` | no | `""` | Subdirectory inside the VCS repo where Terraform runs |
 | `branch` | no | `main` | VCS branch the workspace tracks |
 | `auto_apply` | no | `false` | Auto-apply successful plans |
-| `link_vcs` | no | `false` | When `true`, links the VCS repository to the workspace. When `false` or omitted, the `link-vcs` step is skipped |
 | `tfe_address` | no | `https://app.terraform.io` | Override for TFE / custom HCP endpoints |
 | `workspace_variables` | no | `[]` | Array of `{key, value, sensitive, category}` objects. When omitted or empty, the `set-vars` step is skipped |
 
-### `environments` block — GitHub Environments
+### `aws` block — AWS config and GitHub Environments
 
-An array of per-environment objects. At least one entry is required. The workflow always injects a `ci` environment cloned from `devl` if one exists, so you do not need to list `ci` yourself.
+The `aws` block contains the shared region and the list of environments to provision. At least one environment is required. The workflow always injects a `ci` environment cloned from `devl` if one exists, so you do not need to list `ci` yourself.
 
-| Field | Notes |
+**Top-level `aws` fields:**
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `aws_region` | yes | Shared AWS region applied to every environment |
+| `environments` | yes | Array of environment objects (see below) |
+
+**Per-environment fields:**
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `name` | yes | Environment name (`devl`, `test`, `prod`, …). The workflow iterates in the order listed |
+| `aws_account_alias` | yes | Key looked up in the `AWS_ACCOUNT_ID_MAP` org variable to resolve the AWS account ID |
+| `snowflake_account_name` | no | Populates `SNOWFLAKE_ACCOUNT_NAME` (skipped if empty) |
+| `snowflake_organization_name` | no | Populates `SNOWFLAKE_ORGANIZATION_NAME` (skipped if empty) |
+
+**GitHub Environment variables created per environment:**
+
+| Variable | Source |
 | --- | --- |
-| `name` | Environment name (`devl`, `test`, `prod`, …). The workflow iterates in the order listed |
-| `aws_account_id` | Populates the `AWS_ACCOUNT_ID` variable **and** is used to derive `AWS_OIDC_ROLE` as `arn:aws:iam::<id>:role/github-oidc-role` |
-| `aws_region` | Populates the `AWS_REGION` variable |
-| `snowflake_account_name` | Optional. Populates `SNOWFLAKE_ACCOUNT_NAME` (skipped if empty) |
-| `snowflake_organization_name` | Optional. Populates `SNOWFLAKE_ORGANIZATION_NAME` (skipped if empty) |
+| `AWS_ACCOUNT_ALIAS` | `aws_account_alias` field |
+| `AWS_ACCOUNT_ID` | Resolved via `AWS_ACCOUNT_ID_MAP[aws_account_alias]` |
+| `AWS_REGION` | `aws.aws_region` (shared across all environments) |
+| `AWS_OIDC_ROLE` | `arn:aws:iam::<AWS_ACCOUNT_ID>:role/<AWS_OIDC_ROLE_NAME>` |
+| `SNOWFLAKE_ACCOUNT_NAME` | `snowflake_account_name` (skipped if empty) |
+| `SNOWFLAKE_ORGANIZATION_NAME` | `snowflake_organization_name` (skipped if empty) |
 
 ### `github` block — environment protection
 
@@ -158,7 +202,7 @@ An array of per-environment objects. At least one entry is required. The workflo
 | `block_force_pushes` | `true` | Adds the `non_fast_forward` rule |
 | `prevent_deletion` | `true` | Adds the `deletion` rule |
 
-A second ruleset, `branch-name-policy`, is always created targeting `~ALL` (except `refs/heads/main`) and enforces the regex `^(main|feature/.+|bug/.+)$` on branch names. This one is not configurable from `env.json`.
+A second ruleset, `branch-name-policy`, is always created targeting `~ALL` (except `refs/heads/main`) and enforces the regex `^(main|feature/.+|bug/.+)$` on branch names. This one is not configurable from `environments.yaml`.
 
 ## Creating the Git OAuth app for HCP Terraform
 
@@ -208,6 +252,7 @@ gh secret set TF_VCS_OAUTH_TOKEN_ID \
 | GitHub Environments            | `PUT` is always an upsert                             |
 | GitHub Environment variables   | `POST` — on `409` use `PATCH`                         |
 | Repository ruleset             | List by name — `PUT` if found, `POST` if not          |
+| CODEOWNERS team access         | `PUT /orgs/{org}/teams/{slug}/repos/…` is always an upsert |
 
 ## Repository structure
 
@@ -217,12 +262,18 @@ aws-project-onboarding/
 │   ├── aws-project-onboarding.yaml   # The reusable workflow
 │   ├── create-branch.yaml
 │   └── release.yaml
-├── templates/
-│   ├── aws-project-onboarding.yaml   # Template copy (kept in sync)
-│   └── onboard-aws-project.yaml      # Caller workflow template
-├── env.json                           # Sample configuration
 ├── CLAUDE.md                          # AI development conventions
 └── README.md
+```
+
+**Calling repo layout (application repos):**
+
+```text
+my-app/
+├── .project/
+│   └── environments.yaml             # Onboarding config (the only required file)
+└── .github/workflows/
+    └── onboard-aws-project.yaml      # Caller workflow
 ```
 
 ## Branch protection (this repo)

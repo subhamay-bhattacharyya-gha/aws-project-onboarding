@@ -220,9 +220,9 @@ jobs:
             BODY=$(echo "$RESPONSE" | head -n -1)
 
             if [ "$HTTP_STATUS" != "200" ]; then
-              echo "::error::Failed to fetch org variable '$VAR_NAME' (HTTP $HTTP_STATUS)"
-              echo "::error::Ensure the variable exists at: $OWNER → Settings → Variables → Actions"
-              echo "$BODY" | jq .
+              echo "::error::Failed to fetch org variable '$VAR_NAME' (HTTP $HTTP_STATUS)" >&2
+              echo "::error::Ensure the variable exists at: $OWNER → Settings → Variables → Actions" >&2
+              echo "$BODY" | jq . >&2
               exit 1
             fi
 

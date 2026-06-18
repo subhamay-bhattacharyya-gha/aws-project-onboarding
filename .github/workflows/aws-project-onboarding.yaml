@@ -21,7 +21,7 @@
 #                              administration: write
 # ============================================================
 
-name: AWS Project Onboarding
+name: Setup Repository
 
 on:
   workflow_call:

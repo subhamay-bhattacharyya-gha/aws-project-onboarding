@@ -634,13 +634,8 @@ jobs:
             IS_PROTECTED=$(echo "$APPROVAL_ENVS" | \
               jq -r --arg n "$ENV_NAME" 'any(. == $n)')
 
-            if [ "$IS_PROTECTED" = "true" ]; then
-              REVIEWER_COUNT=$(echo "$REVIEWER_IDS" | jq 'length')
-              if [ "$REVIEWER_COUNT" -eq 0 ]; then
-                echo "::error::Environment '$ENV_NAME' is protected but no reviewer teams resolved"
-                exit 1
-              fi
-
+            REVIEWER_COUNT=$(echo "$REVIEWER_IDS" | jq 'length')
+            if [ "$IS_PROTECTED" = "true" ] && [ "$REVIEWER_COUNT" -gt 0 ]; then
               # Phase 1: attach reviewers without prevent_self_review. GitHub's
               # environment API validates prevent_self_review against the persisted
               # reviewer list, so reviewers must be PUT first (Phase 1), then PUT
@@ -659,7 +654,11 @@ jobs:
               echo "  Tier: protected (wait=${WAIT_TIMER}s, reviewers=${REVIEWER_COUNT}, prevent_self_review=true)"
             else
               PAYLOAD='{}'
-              echo "  Tier: non-protected — no approval gate"
+              if [ "$IS_PROTECTED" = "true" ]; then
+                echo "  Tier: protected (listed in approval_environments) but no reviewer teams found in CODEOWNERS — skipping approval gate"
+              else
+                echo "  Tier: non-protected — no approval gate"
+              fi
             fi
 
             RESPONSE=$(curl -s -w "\n%{http_code}" \
@@ -680,8 +679,8 @@ jobs:
             fi
             echo "  Environment '$ENV_NAME' upserted (HTTP $HTTP_STATUS)"
 
-            # Phase 2: enable prevent_self_review on protected envs
-            if [ "$IS_PROTECTED" = "true" ]; then
+            # Phase 2: enable prevent_self_review on protected envs (only when reviewers exist)
+            if [ "$IS_PROTECTED" = "true" ] && [ "$REVIEWER_COUNT" -gt 0 ]; then
               PERSISTED=$(echo "$BODY" | jq \
                 '[.protection_rules[]? | select(.type=="required_reviewers") | .reviewers[]?] | length')
               echo "  Reviewers persisted after Phase 1: $PERSISTED"

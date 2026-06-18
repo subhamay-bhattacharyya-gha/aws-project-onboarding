@@ -73,7 +73,6 @@ aws:
 github:
   production_environment: prod
   approval_environments: [test, prod]
-  reviewer_teams: [platform-team]
   wait_timer: 5
 
 ruleset:
@@ -114,8 +113,8 @@ jobs:
 
 | Variable              | Description                                                                                    |
 | --------------------- | ---------------------------------------------------------------------------------------------- |
-| `AWS_ACCOUNT_ID_MAP`  | JSON map of environment alias → AWS account ID, e.g. `{"DEVL":"123456789012","PROD":"..."}` |
-| `AWS_OIDC_ROLE_NAME`  | IAM role name used for GitHub OIDC, e.g. `github-oidc-role`                                   |
+| `AWS_ACCOUNT_ID_MAP`  | JSON map of environment alias -> AWS account ID, e.g. `{"DEVL":"123456789012","PROD":"..."}`   |
+| `AWS_OIDC_ROLE_NAME`  | IAM role name used for GitHub OIDC, e.g. `github-oidc-role`                                    |
 
 **Secrets** (set at the org level):
 
@@ -184,10 +183,9 @@ The `aws` block contains the shared region and the list of environments to provi
 | --- | --- | --- |
 | `production_environment` | `prod` | Exact-match name of the production environment |
 | `approval_environments` | `["test", <production_environment>]` | Exact-match list of environments that receive required reviewers, `prevent_self_review: true`, and a main-only deployment branch policy |
-| `reviewer_teams` | `[]` | Team slugs (not names). The workflow resolves each slug to a team ID, grants the team `push` access to the repo, then attaches it as a required reviewer on every protected environment |
 | `wait_timer` | `0` | Minutes to wait before allowing a protected deployment to proceed |
 
-> **Why teams are auto-granted push access.** GitHub silently drops reviewer teams that have no repository access, which then makes `prevent_self_review` fail with *"Required reviewers must have at least one reviewer"*. The workflow upserts team repo access via `PUT /orgs/{org}/teams/{slug}/repos/{owner}/{repo}` before using the team as a reviewer.
+> **Reviewer teams come from `.github/CODEOWNERS`.** The workflow reads every `@org/team-slug` entry from the calling repo's CODEOWNERS file and uses those teams as required reviewers on every protected environment. No `reviewer_teams` field is needed in `environments.yaml`. The workflow also grants each team `push` access to the repo before attaching it as a reviewer — GitHub silently drops reviewer teams that have no repository access, which would cause `prevent_self_review` to fail with *"Required reviewers must have at least one reviewer"*.
 
 ### `ruleset` block — branch protection
 
@@ -252,7 +250,7 @@ gh secret set TF_VCS_OAUTH_TOKEN_ID \
 | GitHub Environments            | `PUT` is always an upsert                             |
 | GitHub Environment variables   | `POST` — on `409` use `PATCH`                         |
 | Repository ruleset             | List by name — `PUT` if found, `POST` if not          |
-| CODEOWNERS team access         | `PUT /orgs/{org}/teams/{slug}/repos/…` is always an upsert |
+| CODEOWNERS team access         | `PUT /orgs/{org}/teams/{slug}/repos` — upsert         |
 
 ## Repository structure
 

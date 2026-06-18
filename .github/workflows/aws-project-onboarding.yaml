@@ -35,7 +35,7 @@ on:
 
 jobs:
   onboard:
-    name: Onboard AWS Project
+    name: Setup Repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -43,7 +43,7 @@ jobs:
     steps:
       # ── Step 0: Checkout ─────────────────────────────────────────────────────
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.3
 
       # ── Step 1: Install yq ───────────────────────────────────────────────────
       - name: Install yq
@@ -106,8 +106,6 @@ jobs:
           # ── Optional github block ─────────────────────────────────────────
           PROD_ENV=$(yq       '.github.production_environment // "prod"' \
                               "$CONFIG_FILE")
-          REVIEWER_TEAMS=$(yq '.github.reviewer_teams // []' \
-                              --output-format=json            "$CONFIG_FILE")
           WAIT_TIMER=$(yq     '.github.wait_timer // 0'       "$CONFIG_FILE")
           APPROVAL_ENVS=$(yq  '.github.approval_environments // ["test","prod"]' \
                               --output-format=json            "$CONFIG_FILE")
@@ -163,10 +161,6 @@ jobs:
 
             echo "approval_environments<<$EOF"
             echo "$APPROVAL_ENVS"
-            echo "$EOF"
-
-            echo "reviewer_teams<<$EOF"
-            echo "$REVIEWER_TEAMS"
             echo "$EOF"
 
             echo "required_status_checks<<$EOF"
@@ -504,7 +498,6 @@ jobs:
           GITHUB_PAT:      ${{ secrets.GITHUB_PAT }}
           ENVIRONMENTS:    ${{ steps.parse.outputs.environments }}
           PROD_ENV:        ${{ steps.parse.outputs.production_environment }}
-          REVIEWER_TEAMS:  ${{ steps.parse.outputs.reviewer_teams }}
           WAIT_TIMER:      ${{ steps.parse.outputs.wait_timer }}
           APPROVAL_ENVS:   ${{ steps.parse.outputs.approval_environments }}
           ACCOUNT_MAP:     ${{ steps.fetch-org-vars.outputs.account_map }}
@@ -515,11 +508,15 @@ jobs:
           OWNER="$GITHUB_REPOSITORY_OWNER"
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
 
-          # ── Resolve reviewer team slugs → [{type:"Team",id:N}] ───────────
+          # ── Resolve reviewer teams from .github/CODEOWNERS ───────────────
+          # Teams listed in CODEOWNERS are used as required reviewers on
+          # protected environments. Push access is granted here so GitHub
+          # does not silently drop reviewer teams that lack repo access.
           REVIEWER_IDS="[]"
-          TEAM_COUNT=$(echo "$REVIEWER_TEAMS" | jq 'length')
-          if [ "$TEAM_COUNT" -gt 0 ]; then
+          CODEOWNERS_FILE=".github/CODEOWNERS"
+          if [[ -f "$CODEOWNERS_FILE" ]]; then
             while read -r SLUG; do
+              [[ -z "$SLUG" ]] && continue
               TEAM_RESP=$(curl -s -w "\n%{http_code}" \
                 --header "Authorization: Bearer $GITHUB_PAT" \
                 --header "Accept: application/vnd.github+json" \
@@ -553,7 +550,10 @@ jobs:
                 exit 1
               fi
               echo "  Granted team '$SLUG' push access to $GITHUB_REPOSITORY"
-            done < <(echo "$REVIEWER_TEAMS" | jq -r '.[]')
+            done < <(grep -oE "@${OWNER}/[a-zA-Z0-9_.-]+" "$CODEOWNERS_FILE" \
+                       | sed "s|@${OWNER}/||" | sort -u)
+          else
+            echo "No CODEOWNERS file found — no reviewer teams will be attached to protected environments"
           fi
 
           # ── Helper: upsert an environment variable ────────────────────────
@@ -985,9 +985,9 @@ jobs:
             IS_PROTECTED=$(echo "$APPROVAL_ENVS" | \
               jq -r --arg n "$ENV_NAME" 'any(. == $n)')
             if [ "$IS_PROTECTED" = "true" ]; then
-              echo "| GitHub Env: \`$ENV_NAME\` | — | Provisioned + approval gate |"
+              echo "| GitHub Env: \`$ENV_NAME\` | \`<redacted>\` | Provisioned + approval gate |"
             else
-              echo "| GitHub Env: \`$ENV_NAME\` | — | Provisioned |"
+              echo "| GitHub Env: \`$ENV_NAME\` | \`<redacted>\` | Provisioned |"
             fi
           done < <(echo "$ENVIRONMENTS" | jq -r '.[].name') >> "$GITHUB_STEP_SUMMARY"
 

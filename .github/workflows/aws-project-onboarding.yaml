@@ -1,11 +1,17 @@
 # ============================================================
-# AWS Project Onboarding — Reusable Workflow
-# Repository : <ORG>/aws-project-onboarding
+# AWS Project Onboarding — Unified Reusable Workflow
+# Repository : subhamay-bhattacharyya-gha/aws-project-onboarding
 # Trigger    : workflow_call only (never push/schedule/dispatch)
 #
-# All project configuration is passed as a single minified JSON
-# string via inputs.config. See project-config.sample.json for
-# the full schema.
+# Config source : .project/environments.yaml  (or .yml)
+# The YAML is parsed at runtime and converted to the JSON schema
+# consumed by the onboarding steps.
+#
+# Required org variables:
+#   AWS_ACCOUNT_ID_MAP   - JSON map of alias → account ID
+#                          e.g. {"DEVL":"123456789012","TEST":"...","PROD":"..."}
+#   AWS_OIDC_ROLE_NAME   - IAM role name used for GitHub OIDC
+#                          e.g. github-oidc-role
 #
 # Required secrets:
 #   TFE_TOKEN              - HCP Terraform API token
@@ -15,15 +21,10 @@
 #                              administration: write
 # ============================================================
 
-name: AWS Project Onboarding
+name: Setup Repository
 
 on:
   workflow_call:
-    inputs:
-      config:
-        description: "Minified JSON string of project-config.json"
-        required: true
-        type: string
     secrets:
       TFE_TOKEN:
         required: true
@@ -34,98 +35,153 @@ on:
 
 jobs:
   onboard:
-    name: Onboard AWS Project
+    name: Setup Repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
 
     steps:
-      # ── Step 0: Parse and validate the config JSON ──
-      - name: Parse config
+      # ── Step 0: Checkout ─────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v6.0.3
+
+      # ── Step 1: Install yq ───────────────────────────────────────────────────
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+
+      # ── Step 2: Resolve .project/environments.yaml|yml ──────────────────────
+      - name: Resolve config file path
+        id: resolve-config
+        run: |
+          set -euo pipefail
+
+          CONFIG_DIR=".project"
+
+          if [[ -f "$CONFIG_DIR/environments.yaml" ]]; then
+            CONFIG_FILE="$CONFIG_DIR/environments.yaml"
+          elif [[ -f "$CONFIG_DIR/environments.yml" ]]; then
+            CONFIG_FILE="$CONFIG_DIR/environments.yml"
+          else
+            echo "::error::No config file found. Expected one of:"
+            echo "::error::  $CONFIG_DIR/environments.yaml"
+            echo "::error::  $CONFIG_DIR/environments.yml"
+            echo "::error::Create the file and commit it to the repository root."
+            exit 1
+          fi
+
+          echo "Resolved config file: $CONFIG_FILE"
+          echo "config_file=$CONFIG_FILE" >> "$GITHUB_OUTPUT"
+
+      # ── Step 3: Parse YAML → JSON and validate ───────────────────────────────
+      - name: Parse and validate config
         id: parse
         env:
-          CONFIG: ${{ inputs.config }}
-          DEFAULT_WS: ${{ github.event.repository.name }}
+          CONFIG_FILE: ${{ steps.resolve-config.outputs.config_file }}
+          DEFAULT_WS:  ${{ github.event.repository.name }}
         run: |
-          if ! echo "$CONFIG" | jq empty 2>/dev/null; then
-            echo "ERROR: inputs.config is not valid JSON"
+          set -euo pipefail
+
+          # ── Extract YAML fields via yq ────────────────────────────────────
+          HCP_ORG=$(yq         '.hcp.hcp_org'                                        "$CONFIG_FILE")
+          TF_VERSION=$(yq      '.hcp.terraform_version // "1.7.0"'                   "$CONFIG_FILE")
+          EXEC_MODE=$(yq       '.hcp.execution_mode // "remote"'                     "$CONFIG_FILE")
+          WORKING_DIR=$(yq     '.hcp.working_directory // ""'                        "$CONFIG_FILE")
+          BRANCH=$(yq          '.hcp.branch // "main"'                               "$CONFIG_FILE")
+          AUTO_APPLY=$(yq      '.hcp.auto_apply // false'                            "$CONFIG_FILE")
+          TFE_ADDRESS=$(yq     '.hcp.tfe_address // "https://app.terraform.io"'      "$CONFIG_FILE")
+          WS_VARIABLES=$(yq    '.hcp.workspace_variables // []' \
+                               --output-format=json                                  "$CONFIG_FILE")
+
+          # Inject shared aws_region into every environment entry using a yq
+          # variable so the region value never has to be exported to the shell env.
+          ENVIRONMENTS_JSON=$(yq \
+            '.aws.aws_region as $r | .aws.environments | map(. + {"aws_region": $r})' \
+            --output-format=json \
+            "$CONFIG_FILE")
+
+          # ── Optional github block ─────────────────────────────────────────
+          PROD_ENV=$(yq       '.github.production_environment // "prod"' \
+                              "$CONFIG_FILE")
+          WAIT_TIMER=$(yq     '.github.wait_timer // 0'       "$CONFIG_FILE")
+          APPROVAL_ENVS=$(yq  '.github.approval_environments // ["test","prod"]' \
+                              --output-format=json            "$CONFIG_FILE")
+
+          # ── Optional ruleset block ────────────────────────────────────────
+          RULESET_ENABLED=$(yq    '.ruleset.ruleset_enabled // true'              "$CONFIG_FILE")
+          TARGET_BRANCH=$(yq      '.ruleset.target_branch // "~DEFAULT_BRANCH"'  "$CONFIG_FILE")
+          REQUIRE_PR=$(yq         '.ruleset.require_pr // true'                  "$CONFIG_FILE")
+          REQUIRED_APPROVALS=$(yq '.ruleset.required_approvals // 1'             "$CONFIG_FILE")
+          DISMISS_STALE=$(yq      '.ruleset.dismiss_stale_reviews // true'       "$CONFIG_FILE")
+          REQUIRED_CHECKS=$(yq    '.ruleset.required_status_checks // []' \
+                                  --output-format=json                           "$CONFIG_FILE")
+          BLOCK_FORCE=$(yq        '.ruleset.block_force_pushes // true'          "$CONFIG_FILE")
+          PREVENT_DELETION=$(yq   '.ruleset.prevent_deletion // true'            "$CONFIG_FILE")
+
+          # ── Validate required fields ──────────────────────────────────────
+          if [[ -z "$HCP_ORG" || "$HCP_ORG" == "null" ]]; then
+            echo "::error::config.hcp.hcp_org is required"
             exit 1
           fi
 
-          CLEAN=$(echo "$CONFIG" | jq -c 'del(.. | ._comment?)')
-
-          # ── hcp block ──
-          HCP_ORG=$(echo "$CLEAN" | jq -r '.hcp.hcp_org // empty')
-          if [ -z "$HCP_ORG" ]; then
-            echo "ERROR: config.hcp.hcp_org is required"
-            exit 1
-          fi
-          WS_NAME=$(echo "$CLEAN" | jq -r --arg d "$DEFAULT_WS" '.hcp.workspace_name // $d')
-          TF_VERSION=$(echo "$CLEAN" | jq -r '.hcp.terraform_version // "1.7.0"')
-          EXEC_MODE=$(echo "$CLEAN" | jq -r '.hcp.execution_mode // "remote"')
-          WORK_DIR=$(echo "$CLEAN" | jq -r '.hcp.working_directory // ""')
-          BRANCH=$(echo "$CLEAN" | jq -r '.hcp.branch // "main"')
-          AUTO_APPLY=$(echo "$CLEAN" | jq -r '.hcp.auto_apply // false')
-          TFE_ADDRESS=$(echo "$CLEAN" | jq -r '.hcp.tfe_address // "https://app.terraform.io"')
-          WS_VARS=$(echo "$CLEAN" | jq -c '.hcp.workspace_variables // []')
-
-          # ── environments block ──
-          ENVS=$(echo "$CLEAN" | jq -c '.environments // []')
-          ENV_LEN=$(echo "$ENVS" | jq 'length')
-          if [ "$ENV_LEN" -eq 0 ]; then
-            echo "ERROR: config.environments is required and must not be empty"
+          ENV_LEN=$(echo "$ENVIRONMENTS_JSON" | jq 'length')
+          if [[ "$ENV_LEN" -eq 0 ]]; then
+            echo "::error::config.aws.environments is required and must not be empty"
             exit 1
           fi
 
-          # Synthesise a 'ci' environment as a clone of 'devl' (hardcoded, not
-          # configurable via project-config.json). Skipped if 'devl' is absent
-          # or 'ci' is already defined by the caller.
-          ENVS=$(echo "$ENVS" | jq -c '
+          # ── Synthesise 'ci' environment as a clone of 'devl' ─────────────
+          ENVS=$(echo "$ENVIRONMENTS_JSON" | jq -c '
             . as $envs
             | ($envs | map(select(.name == "devl")) | first) as $devl
-            | if ($devl != null) and ((. | any(.name == "ci")) | not)
-              then [$devl | .name = "ci"] + .
+            | if ($devl != null) and (($envs | any(.name == "ci")) | not)
+              then [$devl | .name = "ci"] + $envs
               else .
               end
           ')
 
-          # ── github block ──
-          PROD_ENV=$(echo "$CLEAN" | jq -r '.github.production_environment // "prod"')
-          REVIEWER_TEAMS=$(echo "$CLEAN" | jq -c '.github.reviewer_teams // []')
-          WAIT_TIMER=$(echo "$CLEAN" | jq -r '.github.wait_timer // 0')
-          APPROVAL_ENVS=$(echo "$CLEAN" | jq -c --arg p "$PROD_ENV" '.github.approval_environments // ["test", $p]')
+          # ── Resolve workspace name (default: repo name) ───────────────────
+          WS_NAME=$(yq '.hcp.workspace_name // ""' "$CONFIG_FILE")
+          [[ -z "$WS_NAME" || "$WS_NAME" == "null" ]] && WS_NAME="$DEFAULT_WS"
 
-          # ── ruleset block ──
-          RULESET_ENABLED=$(echo "$CLEAN" | jq -r '.ruleset.ruleset_enabled // true')
-          TARGET_BRANCH=$(echo "$CLEAN" | jq -r '.ruleset.target_branch // "~DEFAULT_BRANCH"')
-          REQUIRE_PR=$(echo "$CLEAN" | jq -r '.ruleset.require_pr // true')
-          REQUIRED_APPROVALS=$(echo "$CLEAN" | jq -r '.ruleset.required_approvals // 1')
-          DISMISS_STALE=$(echo "$CLEAN" | jq -r '.ruleset.dismiss_stale_reviews // true')
-          REQUIRED_CHECKS=$(echo "$CLEAN" | jq -c '.ruleset.required_status_checks // []')
-          BLOCK_FORCE=$(echo "$CLEAN" | jq -r '.ruleset.block_force_pushes // true')
-          PREVENT_DELETION=$(echo "$CLEAN" | jq -r '.ruleset.prevent_deletion // true')
+          # ── Write all outputs ─────────────────────────────────────────────
+          EOF=$(uuidgen | tr -d '-')
 
           {
+            echo "environments<<$EOF"
+            echo "$ENVS"
+            echo "$EOF"
+
+            echo "workspace_variables<<$EOF"
+            echo "$WS_VARIABLES"
+            echo "$EOF"
+
+            echo "approval_environments<<$EOF"
+            echo "$APPROVAL_ENVS"
+            echo "$EOF"
+
+            echo "required_status_checks<<$EOF"
+            echo "$REQUIRED_CHECKS"
+            echo "$EOF"
+
             echo "hcp_org=$HCP_ORG"
             echo "workspace_name=$WS_NAME"
             echo "terraform_version=$TF_VERSION"
             echo "execution_mode=$EXEC_MODE"
-            echo "working_directory=$WORK_DIR"
+            echo "working_directory=$WORKING_DIR"
             echo "branch=$BRANCH"
             echo "auto_apply=$AUTO_APPLY"
             echo "tfe_address=$TFE_ADDRESS"
-            echo "workspace_variables=$WS_VARS"
-            echo "environments=$ENVS"
             echo "production_environment=$PROD_ENV"
-            echo "reviewer_teams=$REVIEWER_TEAMS"
             echo "wait_timer=$WAIT_TIMER"
-            echo "approval_environments=$APPROVAL_ENVS"
             echo "ruleset_enabled=$RULESET_ENABLED"
             echo "target_branch=$TARGET_BRANCH"
             echo "require_pr=$REQUIRE_PR"
             echo "required_approvals=$REQUIRED_APPROVALS"
             echo "dismiss_stale_reviews=$DISMISS_STALE"
-            echo "required_status_checks=$REQUIRED_CHECKS"
             echo "block_force_pushes=$BLOCK_FORCE"
             echo "prevent_deletion=$PREVENT_DELETION"
           } >> "$GITHUB_OUTPUT"
@@ -135,15 +191,66 @@ jobs:
           echo "  Workspace    : $WS_NAME"
           echo "  Environments : $(echo "$ENVS" | jq -r '[.[].name] | join(",")')"
 
-      # ── Step 1: Check whether the HCP workspace already exists ──
+      # ── Step 4: Fetch org variables — AWS_ACCOUNT_ID_MAP & AWS_OIDC_ROLE_NAME
+      - name: Fetch org variables
+        id: fetch-org-vars
+        env:
+          ACCOUNT_MAP_RAW: ${{ vars.AWS_ACCOUNT_ID_MAP }}
+          OIDC_ROLE_NAME_RAW: ${{ vars.AWS_OIDC_ROLE_NAME }}
+        run: |
+          set -euo pipefail
+
+          OWNER="$GITHUB_REPOSITORY_OWNER"
+
+          # ── Validate AWS_ACCOUNT_ID_MAP ───────────────────────────────────
+          ACCOUNT_MAP="$ACCOUNT_MAP_RAW"
+
+          if [[ -z "$ACCOUNT_MAP" ]]; then
+            echo "::error::Org variable AWS_ACCOUNT_ID_MAP is not set — add it at: $OWNER → Settings → Variables → Actions"
+            exit 1
+          fi
+
+          if ! echo "$ACCOUNT_MAP" | jq empty 2>/dev/null; then
+            echo "::error::AWS_ACCOUNT_ID_MAP value is not valid JSON"
+            echo "::error::Expected format: {\"DEVL\": \"123456789012\", ...}"
+            exit 1
+          fi
+
+          echo "AWS_ACCOUNT_ID_MAP:"
+          echo "$ACCOUNT_MAP" | jq .
+
+          # ── Validate AWS_OIDC_ROLE_NAME ───────────────────────────────────
+          OIDC_ROLE_NAME="$OIDC_ROLE_NAME_RAW"
+
+          if [[ -z "$OIDC_ROLE_NAME" ]]; then
+            echo "::error::Org variable AWS_OIDC_ROLE_NAME is not set — add it at: $OWNER → Settings → Variables → Actions"
+            exit 1
+          fi
+
+          echo "AWS_OIDC_ROLE_NAME: $OIDC_ROLE_NAME"
+
+          # ── Write outputs ─────────────────────────────────────────────────
+          EOF=$(uuidgen | tr -d '-')
+
+          {
+            echo "account_map<<$EOF"
+            echo "$ACCOUNT_MAP"
+            echo "$EOF"
+
+            echo "oidc_role_name=$OIDC_ROLE_NAME"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── Step 5: Check whether the HCP workspace already exists ──────────────
       - name: Check workspace exists
         id: check
         env:
-          TFE_TOKEN: ${{ secrets.TFE_TOKEN }}
+          TFE_TOKEN:   ${{ secrets.TFE_TOKEN }}
           TFE_ADDRESS: ${{ steps.parse.outputs.tfe_address }}
-          HCP_ORG: ${{ steps.parse.outputs.hcp_org }}
-          WS_NAME: ${{ steps.parse.outputs.workspace_name }}
+          HCP_ORG:     ${{ steps.parse.outputs.hcp_org }}
+          WS_NAME:     ${{ steps.parse.outputs.workspace_name }}
         run: |
+          set -euo pipefail
+
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             --header "Authorization: Bearer $TFE_TOKEN" \
             --header "Content-Type: application/vnd.api+json" \
@@ -153,39 +260,41 @@ jobs:
 
           if [ "$HTTP_STATUS" = "200" ]; then
             WS_ID=$(echo "$BODY" | jq -r '.data.id')
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "exists=true"         >> "$GITHUB_OUTPUT"
             echo "workspace_id=$WS_ID" >> "$GITHUB_OUTPUT"
             echo "Workspace '$WS_NAME' already exists: $WS_ID"
           elif [ "$HTTP_STATUS" = "404" ]; then
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "workspace_id=" >> "$GITHUB_OUTPUT"
+            echo "exists=false"   >> "$GITHUB_OUTPUT"
+            echo "workspace_id="  >> "$GITHUB_OUTPUT"
             echo "Workspace '$WS_NAME' does not exist — will create"
           else
-            echo "ERROR: Unexpected status checking workspace (HTTP $HTTP_STATUS)"
-            echo "$BODY" | jq . || echo "$BODY"
+            echo "::error::Unexpected status checking workspace (HTTP $HTTP_STATUS)"
+            echo "$BODY" | jq .
             exit 1
           fi
 
-      # ── Step 2: Create the workspace (skipped if it already exists) ──
+      # ── Step 6: Create the workspace (skipped if already exists) ────────────
       - name: Create HCP Terraform workspace
         id: create
         if: steps.check.outputs.exists == 'false'
         env:
-          TFE_TOKEN: ${{ secrets.TFE_TOKEN }}
+          TFE_TOKEN:   ${{ secrets.TFE_TOKEN }}
           TFE_ADDRESS: ${{ steps.parse.outputs.tfe_address }}
-          HCP_ORG: ${{ steps.parse.outputs.hcp_org }}
-          WS_NAME: ${{ steps.parse.outputs.workspace_name }}
-          TF_VERSION: ${{ steps.parse.outputs.terraform_version }}
-          EXEC_MODE: ${{ steps.parse.outputs.execution_mode }}
-          WORK_DIR: ${{ steps.parse.outputs.working_directory }}
-          AUTO_APPLY: ${{ steps.parse.outputs.auto_apply }}
+          HCP_ORG:     ${{ steps.parse.outputs.hcp_org }}
+          WS_NAME:     ${{ steps.parse.outputs.workspace_name }}
+          TF_VERSION:  ${{ steps.parse.outputs.terraform_version }}
+          EXEC_MODE:   ${{ steps.parse.outputs.execution_mode }}
+          WORK_DIR:    ${{ steps.parse.outputs.working_directory }}
+          AUTO_APPLY:  ${{ steps.parse.outputs.auto_apply }}
         run: |
+          set -euo pipefail
+
           PAYLOAD=$(jq -n \
-            --arg name "$WS_NAME" \
-            --arg tf_ver "$TF_VERSION" \
+            --arg name      "$WS_NAME" \
+            --arg tf_ver    "$TF_VERSION" \
             --arg exec_mode "$EXEC_MODE" \
-            --arg work_dir "$WORK_DIR" \
-            --argjson auto "$AUTO_APPLY" \
+            --arg work_dir  "$WORK_DIR" \
+            --argjson auto  "$AUTO_APPLY" \
             '{
               data: {
                 type: "workspaces",
@@ -209,7 +318,7 @@ jobs:
           BODY=$(echo "$RESPONSE" | head -n -1)
 
           if [ "$HTTP_STATUS" != "201" ]; then
-            echo "ERROR: Failed to create workspace (HTTP $HTTP_STATUS)"
+            echo "::error::Failed to create workspace (HTTP $HTTP_STATUS)"
             echo "$BODY" | jq .
             exit 1
           fi
@@ -218,7 +327,7 @@ jobs:
           echo "workspace_id=$WS_ID" >> "$GITHUB_OUTPUT"
           echo "Workspace '$WS_NAME' created: $WS_ID"
 
-      # ── Step 3: Resolve workspace ID from either check or create ──
+      # ── Step 7: Resolve workspace ID from check or create ───────────────────
       - name: Resolve workspace ID
         id: resolve
         run: |
@@ -228,20 +337,22 @@ jobs:
             echo "workspace_id=${{ steps.create.outputs.workspace_id }}" >> "$GITHUB_OUTPUT"
           fi
 
-      # ── Step 4: Link VCS repository to the workspace ──
+      # ── Step 8: Link VCS repository to the workspace ─────────────────────────
       - name: Link VCS repository
         id: link-vcs
         env:
-          TFE_TOKEN: ${{ secrets.TFE_TOKEN }}
+          TFE_TOKEN:      ${{ secrets.TFE_TOKEN }}
           OAUTH_TOKEN_ID: ${{ secrets.TF_VCS_OAUTH_TOKEN_ID }}
-          TFE_ADDRESS: ${{ steps.parse.outputs.tfe_address }}
-          BRANCH: ${{ steps.parse.outputs.branch }}
-          WS_ID: ${{ steps.resolve.outputs.workspace_id }}
+          TFE_ADDRESS:    ${{ steps.parse.outputs.tfe_address }}
+          BRANCH:         ${{ steps.parse.outputs.branch }}
+          WS_ID:          ${{ steps.resolve.outputs.workspace_id }}
         run: |
+          set -euo pipefail
+
           PAYLOAD=$(jq -n \
-            --arg repo "$GITHUB_REPOSITORY" \
+            --arg repo     "$GITHUB_REPOSITORY" \
             --arg oauth_id "$OAUTH_TOKEN_ID" \
-            --arg branch "$BRANCH" \
+            --arg branch   "$BRANCH" \
             '{
               data: {
                 type: "workspaces",
@@ -265,22 +376,23 @@ jobs:
           BODY=$(echo "$RESPONSE" | head -n -1)
 
           if [ "$HTTP_STATUS" != "200" ]; then
-            echo "ERROR: Failed to link VCS repository (HTTP $HTTP_STATUS)"
+            echo "::error::Failed to link VCS repository (HTTP $HTTP_STATUS)"
             echo "$BODY" | jq .
             exit 1
           fi
           echo "VCS repository '$GITHUB_REPOSITORY' linked to workspace"
 
-      # ── Step 5: Seed HCP workspace variables ──
-      # Idempotency: POST → on 422 fetch var ID and PATCH.
+      # ── Step 9: Seed HCP workspace variables ─────────────────────────────────
       - name: Set workspace variables
         id: set-vars
         env:
-          TFE_TOKEN: ${{ secrets.TFE_TOKEN }}
+          TFE_TOKEN:   ${{ secrets.TFE_TOKEN }}
           TFE_ADDRESS: ${{ steps.parse.outputs.tfe_address }}
-          WS_ID: ${{ steps.resolve.outputs.workspace_id }}
-          WS_VARS: ${{ steps.parse.outputs.workspace_variables }}
+          WS_ID:       ${{ steps.resolve.outputs.workspace_id }}
+          WS_VARS:     ${{ steps.parse.outputs.workspace_variables }}
         run: |
+          set -euo pipefail
+
           VAR_COUNT=$(echo "$WS_VARS" | jq 'length')
           if [ "$VAR_COUNT" = "0" ]; then
             echo "No workspace variables defined — skipping"
@@ -294,11 +406,11 @@ jobs:
             CATEGORY=$(echo "$VAR"  | jq -r '.category // "terraform"')
 
             CREATE_PAYLOAD=$(jq -n \
-              --arg key  "$KEY" \
-              --arg val  "$VALUE" \
-              --arg cat  "$CATEGORY" \
-              --argjson sens "$SENSITIVE" \
-              --arg wsid "$WS_ID" \
+              --arg key       "$KEY" \
+              --arg val       "$VALUE" \
+              --arg cat       "$CATEGORY" \
+              --argjson sens  "$SENSITIVE" \
+              --arg wsid      "$WS_ID" \
               '{
                 data: {
                   type: "vars",
@@ -334,16 +446,16 @@ jobs:
                 | jq -r --arg k "$KEY" '.data[] | select(.attributes.key == $k) | .id')
 
               if [ -z "$VAR_ID" ]; then
-                echo "ERROR: Variable '$KEY' returned 422 but could not be found for PATCH"
+                echo "::error::Variable '$KEY' returned 422 but could not be found for PATCH"
                 exit 1
               fi
 
               PATCH_PAYLOAD=$(jq -n \
-                --arg id  "$VAR_ID" \
-                --arg key "$KEY" \
-                --arg val "$VALUE" \
-                --arg cat "$CATEGORY" \
-                --argjson sens "$SENSITIVE" \
+                --arg id        "$VAR_ID" \
+                --arg key       "$KEY" \
+                --arg val       "$VALUE" \
+                --arg cat       "$CATEGORY" \
+                --argjson sens  "$SENSITIVE" \
                 '{
                   data: {
                     type: "vars",
@@ -365,42 +477,46 @@ jobs:
                 "$TFE_ADDRESS/api/v2/workspaces/$WS_ID/vars/$VAR_ID")
               PATCH_STATUS=$(echo "$PATCH_RESP" | tail -1)
               PATCH_BODY=$(echo "$PATCH_RESP" | head -n -1)
+
               if [ "$PATCH_STATUS" != "200" ]; then
-                echo "ERROR: Failed to update variable '$KEY' (HTTP $PATCH_STATUS)"
+                echo "::error::Failed to update variable '$KEY' (HTTP $PATCH_STATUS)"
                 echo "$PATCH_BODY" | jq .
                 exit 1
               fi
               echo "  Updated variable: $KEY"
             else
-              echo "ERROR: Failed to create variable '$KEY' (HTTP $HTTP_STATUS)"
+              echo "::error::Failed to create variable '$KEY' (HTTP $HTTP_STATUS)"
               echo "$BODY" | jq .
               exit 1
             fi
           done < <(echo "$WS_VARS" | jq -c '.[]')
 
-      # ── Step 6: Create / update GitHub Environments and their variables ──
-      # Idempotency: PUT is an upsert for environments; POST→on 409 PATCH for vars.
+      # ── Step 10: Create / update GitHub Environments ─────────────────────────
       - name: Setup GitHub environments
         id: setup-environments
         env:
-          GITHUB_PAT: ${{ secrets.GITHUB_PAT }}
-          ENVIRONMENTS: ${{ steps.parse.outputs.environments }}
-          PROD_ENV: ${{ steps.parse.outputs.production_environment }}
-          REVIEWER_TEAMS: ${{ steps.parse.outputs.reviewer_teams }}
-          WAIT_TIMER: ${{ steps.parse.outputs.wait_timer }}
-          APPROVAL_ENVS: ${{ steps.parse.outputs.approval_environments }}
+          GITHUB_PAT:      ${{ secrets.GITHUB_PAT }}
+          ENVIRONMENTS:    ${{ steps.parse.outputs.environments }}
+          PROD_ENV:        ${{ steps.parse.outputs.production_environment }}
+          WAIT_TIMER:      ${{ steps.parse.outputs.wait_timer }}
+          APPROVAL_ENVS:   ${{ steps.parse.outputs.approval_environments }}
+          ACCOUNT_MAP:     ${{ steps.fetch-org-vars.outputs.account_map }}
+          OIDC_ROLE_NAME:  ${{ steps.fetch-org-vars.outputs.oidc_role_name }}
         run: |
-          OWNER="$GITHUB_REPOSITORY_OWNER"
+          set -euo pipefail
 
-          # Resolve reviewer team slugs → [{type:"Team",id:N}] for protected envs,
-          # and ensure each team has push access to this repo (GitHub silently
-          # drops reviewer teams that lack repo access, which makes
-          # prevent_self_review fail with "at least one reviewer" later).
-          REVIEWER_IDS="[]"
+          OWNER="$GITHUB_REPOSITORY_OWNER"
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          TEAM_COUNT=$(echo "$REVIEWER_TEAMS" | jq 'length')
-          if [ "$TEAM_COUNT" -gt 0 ]; then
+
+          # ── Resolve reviewer teams from .github/CODEOWNERS ───────────────
+          # Teams listed in CODEOWNERS are used as required reviewers on
+          # protected environments. Push access is granted here so GitHub
+          # does not silently drop reviewer teams that lack repo access.
+          REVIEWER_IDS="[]"
+          CODEOWNERS_FILE=".github/CODEOWNERS"
+          if [[ -f "$CODEOWNERS_FILE" ]]; then
             while read -r SLUG; do
+              [[ -z "$SLUG" ]] && continue
               TEAM_RESP=$(curl -s -w "\n%{http_code}" \
                 --header "Authorization: Bearer $GITHUB_PAT" \
                 --header "Accept: application/vnd.github+json" \
@@ -409,15 +525,15 @@ jobs:
               TS=$(echo "$TEAM_RESP" | tail -1)
               TB=$(echo "$TEAM_RESP" | head -n -1)
               if [ "$TS" != "200" ]; then
-                echo "ERROR: Failed to resolve reviewer team '$SLUG' (HTTP $TS)"
+                echo "::error::Failed to resolve reviewer team '$SLUG' (HTTP $TS)"
                 echo "$TB" | jq .
                 exit 1
               fi
               TEAM_ID=$(echo "$TB" | jq -r '.id')
-              REVIEWER_IDS=$(echo "$REVIEWER_IDS" | jq -c --argjson id "$TEAM_ID" '. + [{type:"Team",id:$id}]')
+              REVIEWER_IDS=$(echo "$REVIEWER_IDS" | \
+                jq -c --argjson id "$TEAM_ID" '. + [{type:"Team",id:$id}]')
               echo "  Resolved reviewer team '$SLUG' → $TEAM_ID"
 
-              # Grant the team push access to this repo (idempotent upsert).
               GRANT_RESP=$(curl -s -w "\n%{http_code}" \
                 --request PUT \
                 --header "Authorization: Bearer $GITHUB_PAT" \
@@ -429,24 +545,27 @@ jobs:
               GS=$(echo "$GRANT_RESP" | tail -1)
               GB=$(echo "$GRANT_RESP" | head -n -1)
               if [ "$GS" != "204" ]; then
-                echo "ERROR: Failed to grant team '$SLUG' push access to $GITHUB_REPOSITORY (HTTP $GS)"
+                echo "::error::Failed to grant team '$SLUG' push access (HTTP $GS)"
                 echo "$GB" | jq . || echo "$GB"
                 exit 1
               fi
               echo "  Granted team '$SLUG' push access to $GITHUB_REPOSITORY"
-            done < <(echo "$REVIEWER_TEAMS" | jq -r '.[]')
+            done < <(grep -oE "@${OWNER}/[a-zA-Z0-9_.-]+" "$CODEOWNERS_FILE" \
+                       | sed "s|@${OWNER}/||" | sort -u)
+          else
+            echo "No CODEOWNERS file found — no reviewer teams will be attached to protected environments"
           fi
 
+          # ── Helper: upsert an environment variable ────────────────────────
           set_env_var() {
             local ENV_NAME="$1" NAME="$2" VALUE="$3"
             if [ -z "$VALUE" ]; then
               echo "  Skipping $NAME for '$ENV_NAME' (empty value)"
               return 0
             fi
-            local VAR_PAYLOAD
+            local VAR_PAYLOAD VR VS VB PR PS PB
             VAR_PAYLOAD=$(jq -n --arg n "$NAME" --arg v "$VALUE" '{name:$n,value:$v}')
 
-            local VR VS VB
             VR=$(curl -s -w "\n%{http_code}" \
               --request POST \
               --header "Authorization: Bearer $GITHUB_PAT" \
@@ -461,54 +580,68 @@ jobs:
             if [ "$VS" = "201" ]; then
               echo "  Created $NAME for '$ENV_NAME'"
             elif [ "$VS" = "409" ]; then
-              local PATCH_PAYLOAD PR PS PB
-              PATCH_PAYLOAD=$(jq -n --arg n "$NAME" --arg v "$VALUE" '{name:$n,value:$v}')
               PR=$(curl -s -w "\n%{http_code}" \
                 --request PATCH \
                 --header "Authorization: Bearer $GITHUB_PAT" \
                 --header "Accept: application/vnd.github+json" \
                 --header "X-GitHub-Api-Version: 2022-11-28" \
                 --header "Content-Type: application/json" \
-                --data "$PATCH_PAYLOAD" \
+                --data "$VAR_PAYLOAD" \
                 "https://api.github.com/repos/$GITHUB_REPOSITORY/environments/$ENV_NAME/variables/$NAME")
               PS=$(echo "$PR" | tail -1)
               PB=$(echo "$PR" | head -n -1)
               if [ "$PS" != "204" ]; then
-                echo "ERROR: Failed to update env var $NAME for '$ENV_NAME' (HTTP $PS)"
+                echo "::error::Failed to update env var $NAME for '$ENV_NAME' (HTTP $PS)"
                 echo "$PB" | jq .
                 exit 1
               fi
               echo "  Updated $NAME for '$ENV_NAME'"
             else
-              echo "ERROR: Failed to create env var $NAME for '$ENV_NAME' (HTTP $VS)"
+              echo "::error::Failed to create env var $NAME for '$ENV_NAME' (HTTP $VS)"
               echo "$VB" | jq .
               exit 1
             fi
           }
 
+          # ── Loop over each environment ────────────────────────────────────
           while read -r ENV_OBJ; do
-            ENV_NAME=$(echo "$ENV_OBJ"   | jq -r '.name')
-            AWS_ACCOUNT_ID=$(echo "$ENV_OBJ" | jq -r '.aws_account_id // empty')
-            AWS_REGION=$(echo "$ENV_OBJ"     | jq -r '.aws_region // empty')
-            SF_ACCOUNT=$(echo "$ENV_OBJ"     | jq -r '.snowflake_account_name // empty')
-            SF_ORG=$(echo "$ENV_OBJ"         | jq -r '.snowflake_organization_name // empty')
+            ENV_NAME=$(echo "$ENV_OBJ"          | jq -r '.name')
+            AWS_ACCOUNT_ALIAS=$(echo "$ENV_OBJ" | jq -r '.aws_account_alias // empty')
+            AWS_REGION=$(echo "$ENV_OBJ"        | jq -r '.aws_region // empty')
+            SF_ACCOUNT=$(echo "$ENV_OBJ"        | jq -r '.snowflake_account_name // empty')
+            SF_ORG=$(echo "$ENV_OBJ"            | jq -r '.snowflake_organization_name // empty')
 
             echo "--- Configuring environment: $ENV_NAME"
 
-            # Approval gate: exact per-element match against approval_environments list.
-            IS_PROTECTED=$(echo "$APPROVAL_ENVS" | jq -r --arg n "$ENV_NAME" 'any(. == $n)')
-            if [ "$IS_PROTECTED" = "true" ]; then
-              REVIEWER_COUNT=$(echo "$REVIEWER_IDS" | jq 'length')
-              if [ "$REVIEWER_COUNT" -eq 0 ]; then
-                echo "ERROR: environment '$ENV_NAME' is protected but no reviewer teams resolved — prevent_self_review requires at least one reviewer"
-                exit 1
-              fi
+            # ── Resolve account ID from org variable map ──────────────────
+            AWS_ACCOUNT_ID=$(echo "$ACCOUNT_MAP" | \
+              jq -r --arg alias "$AWS_ACCOUNT_ALIAS" '.[$alias] // empty')
+
+            if [ -z "$AWS_ACCOUNT_ID" ]; then
+              echo "::error::No account ID found in AWS_ACCOUNT_ID_MAP for alias '$AWS_ACCOUNT_ALIAS'"
+              echo "::error::Available aliases: $(echo "$ACCOUNT_MAP" | jq -r 'keys | join(", ")')"
+              exit 1
+            fi
+
+            # ── Derive OIDC role ARN using org variable role name ─────────
+            AWS_OIDC_ROLE="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${OIDC_ROLE_NAME}"
+
+            echo "  Alias : $AWS_ACCOUNT_ALIAS"
+            echo "  Acct  : $AWS_ACCOUNT_ID"
+            echo "  Region: $AWS_REGION"
+            echo "  Role  : $AWS_OIDC_ROLE"
+
+            IS_PROTECTED=$(echo "$APPROVAL_ENVS" | \
+              jq -r --arg n "$ENV_NAME" 'any(. == $n)')
+
+            REVIEWER_COUNT=$(echo "$REVIEWER_IDS" | jq 'length')
+            if [ "$IS_PROTECTED" = "true" ] && [ "$REVIEWER_COUNT" -gt 0 ]; then
               # Phase 1: attach reviewers without prevent_self_review. GitHub's
-              # environment API validates prevent_self_review against the
-              # persisted reviewer list, so we must PUT reviewers first, then
-              # PUT again with prevent_self_review in Phase 2.
+              # environment API validates prevent_self_review against the persisted
+              # reviewer list, so reviewers must be PUT first (Phase 1), then PUT
+              # again with prevent_self_review in Phase 2.
               PAYLOAD=$(jq -n \
-                --argjson wait "$WAIT_TIMER" \
+                --argjson wait      "$WAIT_TIMER" \
                 --argjson reviewers "$REVIEWER_IDS" \
                 '{
                   wait_timer: $wait,
@@ -518,10 +651,14 @@ jobs:
                     custom_branch_policies: true
                   }
                 }')
-              echo "  Tier: protected — approval gate enabled (wait=${WAIT_TIMER}, reviewers=${REVIEWER_COUNT}, prevent_self_review=true)"
+              echo "  Tier: protected (wait=${WAIT_TIMER}s, reviewers=${REVIEWER_COUNT}, prevent_self_review=true)"
             else
               PAYLOAD='{}'
-              echo "  Tier: non-protected — no approval gate"
+              if [ "$IS_PROTECTED" = "true" ]; then
+                echo "  Tier: protected (listed in approval_environments) but no reviewer teams found in CODEOWNERS — skipping approval gate"
+              else
+                echo "  Tier: non-protected — no approval gate"
+              fi
             fi
 
             RESPONSE=$(curl -s -w "\n%{http_code}" \
@@ -534,25 +671,26 @@ jobs:
               "https://api.github.com/repos/$GITHUB_REPOSITORY/environments/$ENV_NAME")
             HTTP_STATUS=$(echo "$RESPONSE" | tail -1)
             BODY=$(echo "$RESPONSE" | head -n -1)
+
             if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ]; then
-              echo "ERROR: Failed to upsert environment '$ENV_NAME' (HTTP $HTTP_STATUS)"
+              echo "::error::Failed to upsert environment '$ENV_NAME' (HTTP $HTTP_STATUS)"
               echo "$BODY" | jq .
               exit 1
             fi
             echo "  Environment '$ENV_NAME' upserted (HTTP $HTTP_STATUS)"
 
-            # Phase 2 for protected envs: verify reviewers persisted, then PUT
-            # again with prevent_self_review. If the effective reviewer count
-            # is 0 after Phase 1, the team likely lacks repo access.
-            if [ "$IS_PROTECTED" = "true" ]; then
-              PERSISTED=$(echo "$BODY" | jq '[.protection_rules[]? | select(.type=="required_reviewers") | .reviewers[]?] | length')
+            # Phase 2: enable prevent_self_review on protected envs (only when reviewers exist)
+            if [ "$IS_PROTECTED" = "true" ] && [ "$REVIEWER_COUNT" -gt 0 ]; then
+              PERSISTED=$(echo "$BODY" | jq \
+                '[.protection_rules[]? | select(.type=="required_reviewers") | .reviewers[]?] | length')
               echo "  Reviewers persisted after Phase 1: $PERSISTED"
               if [ "$PERSISTED" = "0" ]; then
-                echo "ERROR: reviewers did not persist on environment '$ENV_NAME'. The team '$(echo "$REVIEWER_TEAMS" | jq -r '.[0]')' probably has no access to this repository."
+                echo "::error::Reviewers did not persist on '$ENV_NAME' — team may lack repo access"
                 exit 1
               fi
+
               PSR_PAYLOAD=$(jq -n \
-                --argjson wait "$WAIT_TIMER" \
+                --argjson wait      "$WAIT_TIMER" \
                 --argjson reviewers "$REVIEWER_IDS" \
                 '{
                   wait_timer:          $wait,
@@ -574,15 +712,13 @@ jobs:
               PSR_STATUS=$(echo "$PSR_RESP" | tail -1)
               PSR_BODY=$(echo "$PSR_RESP" | head -n -1)
               if [ "$PSR_STATUS" != "200" ] && [ "$PSR_STATUS" != "201" ]; then
-                echo "ERROR: Failed to set prevent_self_review on '$ENV_NAME' (HTTP $PSR_STATUS)"
+                echo "::error::Failed to set prevent_self_review on '$ENV_NAME' (HTTP $PSR_STATUS)"
                 echo "$PSR_BODY" | jq .
                 exit 1
               fi
-              echo "  prevent_self_review enabled on '$ENV_NAME' (HTTP $PSR_STATUS)"
-            fi
+              echo "  prevent_self_review enabled on '$ENV_NAME'"
 
-            # For protected environments, restrict deployments to the 'main' branch.
-            if [ "$IS_PROTECTED" = "true" ]; then
+              # Restrict deployments to main branch only
               POL_RESP=$(curl -s -w "\n%{http_code}" \
                 --header "Authorization: Bearer $GITHUB_PAT" \
                 --header "Accept: application/vnd.github+json" \
@@ -591,31 +727,26 @@ jobs:
               PS=$(echo "$POL_RESP" | tail -1)
               PB=$(echo "$POL_RESP" | head -n -1)
               if [ "$PS" != "200" ]; then
-                echo "ERROR: Failed to list deployment branch policies (HTTP $PS)"
+                echo "::error::Failed to list deployment branch policies (HTTP $PS)"
                 echo "$PB" | jq .
                 exit 1
               fi
               HAS_MAIN=$(echo "$PB" | jq '[.branch_policies[]? | select(.name=="main")] | length')
               if [ "$HAS_MAIN" = "0" ]; then
-                POL_PAYLOAD=$(jq -n '{name:"main",type:"branch"}')
                 curl -s -o /dev/null \
                   --request POST \
                   --header "Authorization: Bearer $GITHUB_PAT" \
                   --header "Accept: application/vnd.github+json" \
                   --header "X-GitHub-Api-Version: 2022-11-28" \
                   --header "Content-Type: application/json" \
-                  --data "$POL_PAYLOAD" \
+                  --data '{"name":"main","type":"branch"}' \
                   "https://api.github.com/repos/$GITHUB_REPOSITORY/environments/$ENV_NAME/deployment-branch-policies"
                 echo "  Added deployment branch policy: main"
               fi
             fi
 
-            if [ -n "$AWS_ACCOUNT_ID" ]; then
-              AWS_OIDC_ROLE="arn:aws:iam::${AWS_ACCOUNT_ID}:role/github-oidc-role"
-            else
-              AWS_OIDC_ROLE=""
-            fi
-
+            # ── Set environment variables ─────────────────────────────────
+            set_env_var "$ENV_NAME" "AWS_ACCOUNT_ALIAS"           "$AWS_ACCOUNT_ALIAS"
             set_env_var "$ENV_NAME" "AWS_ACCOUNT_ID"              "$AWS_ACCOUNT_ID"
             set_env_var "$ENV_NAME" "AWS_REGION"                  "$AWS_REGION"
             set_env_var "$ENV_NAME" "AWS_OIDC_ROLE"               "$AWS_OIDC_ROLE"
@@ -623,21 +754,22 @@ jobs:
             set_env_var "$ENV_NAME" "SNOWFLAKE_ORGANIZATION_NAME" "$SF_ORG"
           done < <(echo "$ENVIRONMENTS" | jq -c '.[]')
 
-      # ── Step 7: Create / update repository ruleset ──
-      # Idempotency: list by name → PUT if found, POST if not.
+      # ── Step 11: Create / update repository rulesets ────────────────────────
       - name: Setup repository ruleset
         id: setup-ruleset
         if: steps.parse.outputs.ruleset_enabled == 'true'
         env:
-          GITHUB_PAT: ${{ secrets.GITHUB_PAT }}
-          TARGET_BRANCH: ${{ steps.parse.outputs.target_branch }}
-          REQUIRE_PR: ${{ steps.parse.outputs.require_pr }}
+          GITHUB_PAT:         ${{ secrets.GITHUB_PAT }}
+          TARGET_BRANCH:      ${{ steps.parse.outputs.target_branch }}
+          REQUIRE_PR:         ${{ steps.parse.outputs.require_pr }}
           REQUIRED_APPROVALS: ${{ steps.parse.outputs.required_approvals }}
-          DISMISS_STALE: ${{ steps.parse.outputs.dismiss_stale_reviews }}
-          REQUIRED_CHECKS: ${{ steps.parse.outputs.required_status_checks }}
-          BLOCK_FORCE: ${{ steps.parse.outputs.block_force_pushes }}
-          PREVENT_DELETION: ${{ steps.parse.outputs.prevent_deletion }}
+          DISMISS_STALE:      ${{ steps.parse.outputs.dismiss_stale_reviews }}
+          REQUIRED_CHECKS:    ${{ steps.parse.outputs.required_status_checks }}
+          BLOCK_FORCE:        ${{ steps.parse.outputs.block_force_pushes }}
+          PREVENT_DELETION:   ${{ steps.parse.outputs.prevent_deletion }}
         run: |
+          set -euo pipefail
+
           RULES=$(jq -n \
             --argjson require_pr  "$REQUIRE_PR" \
             --argjson approvals   "$REQUIRED_APPROVALS" \
@@ -647,35 +779,31 @@ jobs:
             --argjson prevent_del "$PREVENT_DELETION" \
             '
             [
-              (if $prevent_del then {type:"deletion"} else empty end),
-              (if $block_force then {type:"non_fast_forward"} else empty end),
-              (if $require_pr then
-                {
-                  type: "pull_request",
-                  parameters: {
-                    required_approving_review_count:   $approvals,
-                    dismiss_stale_reviews_on_push:     $dismiss,
-                    require_code_owner_review:         false,
-                    require_last_push_approval:        false,
-                    required_review_thread_resolution: false
-                  }
+              (if $prevent_del  then {type:"deletion"}         else empty end),
+              (if $block_force  then {type:"non_fast_forward"} else empty end),
+              (if $require_pr   then {
+                type: "pull_request",
+                parameters: {
+                  required_approving_review_count:   $approvals,
+                  dismiss_stale_reviews_on_push:     $dismiss,
+                  require_code_owner_review:         false,
+                  require_last_push_approval:        false,
+                  required_review_thread_resolution: false
                 }
-                else empty end),
-              (if ($checks | length) > 0 then
-                {
-                  type: "required_status_checks",
-                  parameters: {
-                    strict_required_status_checks_policy: false,
-                    required_status_checks: ($checks | map({context: .}))
-                  }
+              } else empty end),
+              (if ($checks | length) > 0 then {
+                type: "required_status_checks",
+                parameters: {
+                  strict_required_status_checks_policy: false,
+                  required_status_checks: ($checks | map({context: .}))
                 }
-                else empty end)
+              } else empty end)
             ]
             ')
 
           PROTECTION_PAYLOAD=$(jq -n \
-            --arg target "$TARGET_BRANCH" \
-            --argjson rules "$RULES" \
+            --arg     target "$TARGET_BRANCH" \
+            --argjson rules  "$RULES" \
             '{
               name:        "standard-branch-protection",
               target:      "branch",
@@ -694,17 +822,15 @@ jobs:
               conditions: {
                 ref_name: { include: ["~ALL"], exclude: ["refs/heads/main"] }
               },
-              rules: [
-                {
-                  type: "branch_name_pattern",
-                  parameters: {
-                    operator: "regex",
-                    pattern:  "^(main|feature/.+|bug/.+)$",
-                    negate:   false,
-                    name:     "Allowed branch names"
-                  }
+              rules: [{
+                type: "branch_name_pattern",
+                parameters: {
+                  operator: "regex",
+                  pattern:  "^(main|feature/.+|bug/.+)$",
+                  negate:   false,
+                  name:     "Allowed branch names"
                 }
-              ]
+              }]
             }')
 
           upsert_ruleset() {
@@ -719,11 +845,12 @@ jobs:
             LS=$(echo "$LIST_RESP" | tail -1)
             LB=$(echo "$LIST_RESP" | head -n -1)
             if [ "$LS" != "200" ]; then
-              echo "ERROR: Failed to list rulesets (HTTP $LS)"
+              echo "::error::Failed to list rulesets (HTTP $LS)"
               echo "$LB" | jq .
               exit 1
             fi
-            EXISTING_ID=$(echo "$LB" | jq -r --arg name "$NAME" '.[] | select(.name == $name) | .id' | head -1)
+            EXISTING_ID=$(echo "$LB" | \
+              jq -r --arg name "$NAME" '.[] | select(.name == $name) | .id' | head -1)
 
             if [ -n "$EXISTING_ID" ]; then
               RESPONSE=$(curl -s -w "\n%{http_code}" \
@@ -750,7 +877,7 @@ jobs:
             HTTP_STATUS=$(echo "$RESPONSE" | tail -1)
             BODY=$(echo "$RESPONSE" | head -n -1)
             if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ]; then
-              echo "ERROR: Failed to $ACTION ruleset '$NAME' (HTTP $HTTP_STATUS)"
+              echo "::error::Failed to $ACTION ruleset '$NAME' (HTTP $HTTP_STATUS)"
               echo "$BODY" | jq .
               exit 1
             fi
@@ -760,46 +887,110 @@ jobs:
           upsert_ruleset "standard-branch-protection" "$PROTECTION_PAYLOAD"
           upsert_ruleset "branch-name-policy"         "$NAME_POLICY_PAYLOAD"
 
-      # ── Step 8: Write job summary ──
+      # ── Step 12: Grant push access to teams listed in .github/CODEOWNERS ─────
+      # Idempotency: PUT /orgs/{org}/teams/{slug}/repos/{owner}/{repo} is always
+      # an upsert — safe to re-run. GitHub enforces CODEOWNERS review rules only
+      # for teams/users that have at least write access to the repository; this
+      # step ensures every team in CODEOWNERS meets that requirement.
+      - name: Sync CODEOWNERS teams
+        id: sync-codeowners
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_PAT }}
+        run: |
+          set -euo pipefail
+
+          CODEOWNERS_FILE=".github/CODEOWNERS"
+          OWNER="$GITHUB_REPOSITORY_OWNER"
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+
+          if [[ ! -f "$CODEOWNERS_FILE" ]]; then
+            echo "No CODEOWNERS file found at $CODEOWNERS_FILE — skipping"
+            echo "team_count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Extract team slugs that belong to this org: @org/team-slug
+          # Individual owners (@username, no slash) are ignored.
+          TEAMS=$(grep -oE "@${OWNER}/[a-zA-Z0-9_.-]+" "$CODEOWNERS_FILE" \
+            | sed "s|@${OWNER}/||" | sort -u)
+
+          if [[ -z "$TEAMS" ]]; then
+            echo "No team references found for org '$OWNER' in $CODEOWNERS_FILE — skipping"
+            echo "team_count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          TEAM_COUNT=$(echo "$TEAMS" | wc -l | tr -d ' ')
+          echo "Found $TEAM_COUNT team(s) in CODEOWNERS:"
+
+          while read -r SLUG; do
+            [[ -z "$SLUG" ]] && continue
+
+            RESPONSE=$(curl -s -w "\n%{http_code}" \
+              --request PUT \
+              --header "Authorization: Bearer $GITHUB_PAT" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --header "Content-Type: application/json" \
+              --data '{"permission":"push"}' \
+              "https://api.github.com/orgs/$OWNER/teams/$SLUG/repos/$OWNER/$REPO_NAME")
+            HTTP_STATUS=$(echo "$RESPONSE" | tail -1)
+            BODY=$(echo "$RESPONSE" | head -n -1)
+
+            if [ "$HTTP_STATUS" = "204" ]; then
+              echo "  Granted team '$SLUG' push access to $GITHUB_REPOSITORY"
+            else
+              echo "::error::Failed to grant team '$SLUG' push access (HTTP $HTTP_STATUS)"
+              echo "$BODY" | jq . || echo "$BODY"
+              exit 1
+            fi
+          done <<< "$TEAMS"
+
+          echo "team_count=$TEAM_COUNT" >> "$GITHUB_OUTPUT"
+
+      # ── Step 13: Write job summary ───────────────────────────────────────────
       - name: Write job summary
         id: summary
         if: always()
         env:
-          ENVIRONMENTS: ${{ steps.parse.outputs.environments }}
-          APPROVAL_ENVS: ${{ steps.parse.outputs.approval_environments }}
-          WS_VARS: ${{ steps.parse.outputs.workspace_variables }}
-          RULESET_ENABLED: ${{ steps.parse.outputs.ruleset_enabled }}
-          WS_NAME: ${{ steps.parse.outputs.workspace_name }}
-          WS_EXISTS: ${{ steps.check.outputs.exists }}
+          ENVIRONMENTS:       ${{ steps.parse.outputs.environments }}
+          APPROVAL_ENVS:      ${{ steps.parse.outputs.approval_environments }}
+          WS_VARS:            ${{ steps.parse.outputs.workspace_variables }}
+          RULESET_ENABLED:    ${{ steps.parse.outputs.ruleset_enabled }}
+          WS_NAME:            ${{ steps.parse.outputs.workspace_name }}
+          WS_EXISTS:          ${{ steps.check.outputs.exists }}
+          OIDC_ROLE_NAME:     ${{ steps.fetch-org-vars.outputs.oidc_role_name }}
+          CODEOWNERS_TEAMS:   ${{ steps.sync-codeowners.outputs.team_count }}
         run: |
           WS_STATUS="Already existed"
           [ "$WS_EXISTS" = "false" ] && WS_STATUS="Created"
-
           VAR_COUNT=$(echo "$WS_VARS" | jq 'length')
-
-          if [ "$RULESET_ENABLED" = "true" ]; then
-            RS_STATUS="Created / Updated"
-          else
-            RS_STATUS="Skipped"
-          fi
+          RS_STATUS="Skipped"
+          [ "$RULESET_ENABLED" = "true" ] && RS_STATUS="Created / Updated"
+          CO_COUNT="${CODEOWNERS_TEAMS:-0}"
 
           {
             echo "### AWS Project Onboarding Summary"
             echo ""
             echo "| Resource | Value | Status |"
             echo "|---|---|---|"
-            echo "| HCP workspace | $WS_NAME | $WS_STATUS |"
-            echo "| VCS link | $GITHUB_REPOSITORY | Linked |"
-            echo "| Workspace variables | $VAR_COUNT variables | Seeded |"
+            echo "| HCP workspace        | \`$WS_NAME\`          | $WS_STATUS         |"
+            echo "| VCS link             | \`$GITHUB_REPOSITORY\` | Linked             |"
+            echo "| Workspace variables  | $VAR_COUNT variables  | Seeded             |"
+            echo "| OIDC role name       | \`$OIDC_ROLE_NAME\`   | Read from org var  |"
           } >> "$GITHUB_STEP_SUMMARY"
 
           while read -r ENV_NAME; do
-            IS_PROTECTED=$(echo "$APPROVAL_ENVS" | jq -r --arg n "$ENV_NAME" 'any(. == $n)')
+            IS_PROTECTED=$(echo "$APPROVAL_ENVS" | \
+              jq -r --arg n "$ENV_NAME" 'any(. == $n)')
             if [ "$IS_PROTECTED" = "true" ]; then
-              echo "| GitHub Environment: $ENV_NAME | — | Provisioned + approval gate |" >> "$GITHUB_STEP_SUMMARY"
+              echo "| GitHub Env: \`$ENV_NAME\` | \`<redacted>\` | Provisioned + approval gate |"
             else
-              echo "| GitHub Environment: $ENV_NAME | — | Provisioned |" >> "$GITHUB_STEP_SUMMARY"
+              echo "| GitHub Env: \`$ENV_NAME\` | \`<redacted>\` | Provisioned |"
             fi
-          done < <(echo "$ENVIRONMENTS" | jq -r '.[].name')
+          done < <(echo "$ENVIRONMENTS" | jq -r '.[].name') >> "$GITHUB_STEP_SUMMARY"
 
-          echo "| Repository ruleset | standard-branch-protection | $RS_STATUS |" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "| Repository ruleset   | \`standard-branch-protection\` | $RS_STATUS |"
+            echo "| CODEOWNERS teams     | $CO_COUNT team(s) granted push access | Synced |"
+          } >> "$GITHUB_STEP_SUMMARY"

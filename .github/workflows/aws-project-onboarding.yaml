@@ -43,7 +43,7 @@ jobs:
     steps:
       # ── Step 0: Checkout ─────────────────────────────────────────────────────
       - name: Checkout
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7
 
       # ── Step 1: Install yq ───────────────────────────────────────────────────
       - name: Install yq
